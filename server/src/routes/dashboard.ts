@@ -59,6 +59,10 @@ function computeCurrentStockForItem(
   return stock;
 }
 
+/**
+ * GET /dashboard - Comprehensive 360° Business Dashboard
+ * Provides real-time business metrics including sales, expenses, cash flow, jobs, and more
+ */
 router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { from, to } = req.query;
@@ -66,7 +70,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
 
     // ============================================
     // 1. SALES ANALYTICS
-    // ✅ FIXED: Only query Sales (job payments already create sales)
     // ============================================
     
     const sales = await prisma.sale.findMany({
@@ -121,7 +124,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
 
     let totalExpensesPaise = 0;
     let totalEmployeeAdvancesPaise = 0;
-    let totalSalaryPaidPaise = 0;  // ✅ NEW: Track salary payments
+    let totalSalaryPaidPaise = 0;
     const expensesByDate = new Map<string, number>();
     const expensesByCategory = new Map<string, number>();
     const expensesByPaidBy = new Map<string, number>();
@@ -133,18 +136,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       if (!v) continue;
 
       const isEmployeeAdvance = v.category === "Employee Advance";
-      // ✅ FIXED: Match any category containing 'salary' (case-insensitive)
       const isSalary = v.category && v.category.toLowerCase().includes('salary');
-
-      // ✅ DEBUG: Log salary detection
-      if (v.category && v.category.toLowerCase().includes('salary')) {
-        console.log('💰 Found salary expense:', {
-          category: v.category,
-          amount: paiseToRupees(v.amount),
-          vendor: v.vendor,
-          isSalary,
-        });
-      }
 
       if (isEmployeeAdvance) {
         totalEmployeeAdvancesPaise += v.amount;
@@ -153,10 +145,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       } else {
         totalExpensesPaise += v.amount;
 
-        // ✅ NEW: Track salary payments
         if (isSalary) {
           totalSalaryPaidPaise += v.amount;
-          console.log('✅ Added to salary paid:', paiseToRupees(v.amount), 'Total now:', paiseToRupees(totalSalaryPaidPaise));
         }
 
         const date = v.date.toISOString().slice(0, 10);
@@ -173,11 +163,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    console.log('💰 Total salary paid this period:', paiseToRupees(totalSalaryPaidPaise));
-
     // ============================================
     // 3. CASH FLOW TRACKING
-    // ✅ FIXED: Now includes employee advances in cash flow
     // ============================================
     const cashFlow: any = {
       Nitesh: { received: 0, paid: 0, net: 0 },
@@ -185,17 +172,15 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       "Bank Account": { received: 0, paid: 0, net: 0 },
     };
 
-    // Add sales received
     salesByReceiver.forEach((amount, person) => {
       if (cashFlow[person]) cashFlow[person].received += amount;
     });
 
-    // Add regular expenses paid
     expensesByPaidBy.forEach((amount, person) => {
       if (cashFlow[person]) cashFlow[person].paid += amount;
     });
 
-    // ✅ NEW: Add employee advances paid (these are also expenses!)
+    // Add employee advances to cash flow
     for (const e of expenses) {
       const v = e.currentVersion;
       if (!v) continue;
@@ -209,7 +194,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Convert to rupees
     Object.keys(cashFlow).forEach((person) => {
       cashFlow[person].net = cashFlow[person].received - cashFlow[person].paid;
       cashFlow[person].received = paiseToRupees(cashFlow[person].received);
@@ -356,7 +340,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       if (emp.isActive) {
         employeeStats.active++;
         
-        // ✅ Calculate unpaid leave deduction
+        // Calculate unpaid leave deduction
         let unpaidLeaveDays = 0;
         for (const att of emp.attendances) {
           if (att.status === "UNPAID_LEAVE") {
@@ -364,18 +348,13 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           }
         }
         
-        // ✅ Deduct unpaid leave from base salary
-        // Assuming 26 working days per month (adjust if needed)
+        // Deduct unpaid leave from base salary (26 working days/month)
         const workingDaysPerMonth = 26;
         const dailySalary = emp.baseSalary / workingDaysPerMonth;
         const unpaidLeaveDeduction = Math.round(dailySalary * unpaidLeaveDays);
         const effectiveSalary = emp.baseSalary - unpaidLeaveDeduction;
         
         totalSalaryLiability += effectiveSalary;
-        
-        if (unpaidLeaveDays > 0) {
-          console.log(`💰 ${emp.name}: Base ₹${paiseToRupees(emp.baseSalary)}, Unpaid leaves: ${unpaidLeaveDays} days, Deduction: ₹${paiseToRupees(unpaidLeaveDeduction)}, Effective: ₹${paiseToRupees(effectiveSalary)}`);
-        }
       } else {
         employeeStats.inactive++;
       }
@@ -402,18 +381,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ✅ NEW: Subtract already paid salaries AND advances from liability
-    console.log('💰 Salary calculation:', {
-      totalBaseSalary: paiseToRupees(totalSalaryLiability),
-      totalSalaryPaid: paiseToRupees(totalSalaryPaidPaise),
-      totalAdvances: paiseToRupees(totalEmployeeAdvancesPaise),
-      activeEmployees: employeeStats.active,
-    });
-    
-    // ✅ Subtract both salary payments AND employee advances
+    // Subtract paid salaries and advances from liability
     totalSalaryLiability = Math.max(0, totalSalaryLiability - totalSalaryPaidPaise - totalEmployeeAdvancesPaise);
-    
-    console.log('💰 Final salary due:', paiseToRupees(totalSalaryLiability));
 
     advancesByEmployee.sort((a, b) => b.totalAdvances - a.totalAdvances);
 
