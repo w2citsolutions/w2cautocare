@@ -355,7 +355,27 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
     for (const emp of employees) {
       if (emp.isActive) {
         employeeStats.active++;
-        totalSalaryLiability += emp.baseSalary;
+        
+        // ✅ Calculate unpaid leave deduction
+        let unpaidLeaveDays = 0;
+        for (const att of emp.attendances) {
+          if (att.status === "UNPAID_LEAVE") {
+            unpaidLeaveDays++;
+          }
+        }
+        
+        // ✅ Deduct unpaid leave from base salary
+        // Assuming 26 working days per month (adjust if needed)
+        const workingDaysPerMonth = 26;
+        const dailySalary = emp.baseSalary / workingDaysPerMonth;
+        const unpaidLeaveDeduction = Math.round(dailySalary * unpaidLeaveDays);
+        const effectiveSalary = emp.baseSalary - unpaidLeaveDeduction;
+        
+        totalSalaryLiability += effectiveSalary;
+        
+        if (unpaidLeaveDays > 0) {
+          console.log(`💰 ${emp.name}: Base ₹${paiseToRupees(emp.baseSalary)}, Unpaid leaves: ${unpaidLeaveDays} days, Deduction: ₹${paiseToRupees(unpaidLeaveDeduction)}, Effective: ₹${paiseToRupees(effectiveSalary)}`);
+        }
       } else {
         employeeStats.inactive++;
       }
