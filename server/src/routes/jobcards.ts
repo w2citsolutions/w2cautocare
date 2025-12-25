@@ -361,6 +361,9 @@ async function syncJobCardSale(jobId: number) {
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
     )[0];
 
+    // ✅ Safety check for TypeScript
+    if (!recentPayment) continue;
+
     // Create the sale
     const sale = await prisma.sale.create({
       data: { jobCardId: jobId },
