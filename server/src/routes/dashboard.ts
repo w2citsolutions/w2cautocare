@@ -156,6 +156,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
 
     // ============================================
     // 3. CASH FLOW TRACKING
+    // ✅ FIXED: Now includes employee advances in cash flow
     // ============================================
     const cashFlow: any = {
       Nitesh: { received: 0, paid: 0, net: 0 },
@@ -163,14 +164,31 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       "Bank Account": { received: 0, paid: 0, net: 0 },
     };
 
+    // Add sales received
     salesByReceiver.forEach((amount, person) => {
       if (cashFlow[person]) cashFlow[person].received += amount;
     });
 
+    // Add regular expenses paid
     expensesByPaidBy.forEach((amount, person) => {
       if (cashFlow[person]) cashFlow[person].paid += amount;
     });
 
+    // ✅ NEW: Add employee advances paid (these are also expenses!)
+    for (const e of expenses) {
+      const v = e.currentVersion;
+      if (!v) continue;
+
+      const isEmployeeAdvance = v.category === "Employee Advance";
+      if (isEmployeeAdvance) {
+        const paidBy = parsePaidBy(v.note) || "Untracked";
+        if (cashFlow[paidBy]) {
+          cashFlow[paidBy].paid += v.amount;
+        }
+      }
+    }
+
+    // Convert to rupees
     Object.keys(cashFlow).forEach((person) => {
       cashFlow[person].net = cashFlow[person].received - cashFlow[person].paid;
       cashFlow[person].received = paiseToRupees(cashFlow[person].received);
