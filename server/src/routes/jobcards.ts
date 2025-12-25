@@ -1,5 +1,5 @@
 // server/src/routes/jobcards.ts
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { PaymentMode, JobStatus, JobLineType, JobPaymentType } from "@prisma/client";
@@ -292,12 +292,9 @@ async function recalcJobFinancials(jobCardId: number) {
 
 
 /**
- * ✅ UPDATED: Create SEPARATE sales for each payment receiver
+ * ✅ FIXED: Create SEPARATE sales for each payment receiver
  * This ensures proper tracking when Nitesh, Tanmeet, and Bank each receive different amounts
- * 
- * Example:
- * Job has payments: ₹5000 (Nitesh), ₹3000 (Tanmeet), ₹2000 (Bank)
- * Creates 3 sales: one for each receiver
+ * FIXED: Prevents duplicates by normalizing null/empty receivedBy values
  */
 async function syncJobCardSale(jobId: number) {
   // Get job with all payments and existing sales
@@ -334,15 +331,25 @@ async function syncJobCardSale(jobId: number) {
   // If no valid payments, we're done
   if (validPayments.length === 0) return;
 
+  // ✅ FIX: Normalize receivedBy to avoid duplicates
+  const normalizeReceiver = (receivedBy: string | null | undefined): string => {
+    if (!receivedBy || receivedBy.trim() === '') {
+      return 'Untracked';
+    }
+    return receivedBy.trim();
+  };
+
   // Group payments by receivedBy
   const paymentsByReceiver = validPayments.reduce((acc, payment) => {
-    const receiver = payment.receivedBy || "Unknown";
+    const receiver = normalizeReceiver(payment.receivedBy);
     if (!acc[receiver]) {
       acc[receiver] = [];
     }
     acc[receiver].push(payment);
     return acc;
   }, {} as Record<string, typeof validPayments>);
+
+  console.log(`📊 Creating sales for job ${job.jobNumber}:`, Object.keys(paymentsByReceiver));
 
   // Create separate sale for each receiver
   for (const [receivedBy, payments] of Object.entries(paymentsByReceiver)) {
@@ -364,10 +371,10 @@ async function syncJobCardSale(jobId: number) {
       data: {
         saleId: sale.id,
         versionNumber: 1,
-        date: recentPayment?.date || new Date(),
+        date: recentPayment.date,
         amount: totalAmount,
         category: "Service",
-        paymentMode: recentPayment?.paymentMode || "CASH",
+        paymentMode: recentPayment.paymentMode,
         reference: job.jobNumber,
         receivedBy: receivedBy,
       },
@@ -380,7 +387,7 @@ async function syncJobCardSale(jobId: number) {
     });
 
     console.log(
-      `✅ Created sale for ${receivedBy}: ₹${(totalAmount / 100).toFixed(2)} (Job ${job.jobNumber})`
+      `✅ Created sale for ${receivedBy}: ₹${(totalAmount / 100).toFixed(2)} (${payments.length} payment${payments.length > 1 ? 's' : ''}, Job ${job.jobNumber})`
     );
   }
 }
@@ -391,7 +398,7 @@ async function syncJobCardSale(jobId: number) {
  * ----------------------------- */
 
 // ✅ UPDATED: POST /jobcards - now handles vehicleModel
-router.post("/", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const body = req.body as CreateJobCardBody;
 
@@ -485,7 +492,7 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * GET /jobcards
  */
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { status, reg, from, to } = req.query as any;
 
@@ -525,7 +532,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * GET /jobcards/:id
  */
-router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
@@ -551,7 +558,7 @@ router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
  * PUT /jobcards/:id
  * ✅ Accepts UI aliases: diagnosis/notes/workRecommended
  */
-router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
@@ -611,7 +618,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * POST /jobcards/:id/line-items
  */
-router.post("/:id/line-items", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/:id/line-items", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
@@ -658,7 +665,7 @@ router.post("/:id/line-items", authMiddleware, async (req: AuthRequest, res) => 
 /**
  * PUT /jobcards/:id/line-items/:lineId
  */
-router.put("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     const lineId = Number(req.params.lineId);
@@ -698,7 +705,7 @@ router.put("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, r
 /**
  * DELETE /jobcards/:id/line-items/:lineId
  */
-router.delete("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res) => {
+router.delete("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     const lineId = Number(req.params.lineId);
@@ -721,7 +728,7 @@ router.delete("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest
  * POST /jobcards/:id/payments
  * ✅ Now stores receivedBy in payment record
  */
-router.post("/:id/payments", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/:id/payments", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
@@ -773,7 +780,7 @@ router.post("/:id/payments", authMiddleware, async (req: AuthRequest, res) => {
  * PUT /jobcards/:id/payments/:paymentId
  * ✅ Now updates receivedBy in payment record
  */
-router.put("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     const paymentId = Number(req.params.paymentId);
@@ -825,7 +832,7 @@ router.put("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, 
 /**
  * DELETE /jobcards/:id/payments/:paymentId
  */
-router.delete("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res) => {
+router.delete("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     const paymentId = Number(req.params.paymentId);
@@ -852,7 +859,7 @@ router.delete("/:id/payments/:paymentId", authMiddleware, async (req: AuthReques
 /**
  * POST /jobcards/:id/close
  */
-router.post("/:id/close", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/:id/close", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = Number(req.params.id);
     if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
@@ -910,7 +917,7 @@ router.post("/:id/close", authMiddleware, async (req: AuthRequest, res) => {
  * DELETE /jobcards/:id
  * ✅ Now deletes ALL associated sales (1:many relationship)
  */
-router.delete("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
