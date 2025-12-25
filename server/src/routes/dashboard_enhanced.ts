@@ -1,8 +1,12 @@
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 
 const router = Router();
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
 
 function parseDateRange(from?: any, to?: any) {
   const now = new Date();
@@ -35,7 +39,13 @@ function parseDateRange(from?: any, to?: any) {
 
 function paiseToRupees(amount: number | null | undefined) {
   if (!amount) return 0;
-  return amount / 100;
+  return Math.round(amount) / 100;
+}
+
+function parsePaidBy(note: string | null): string | null {
+  if (!note) return null;
+  const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
+  return match ? (match[1] || null) : null;
 }
 
 function computeCurrentStockForItem(
@@ -50,69 +60,90 @@ function computeCurrentStockForItem(
 }
 
 /**
- * GET /dashboard - Enhanced dashboard with comprehensive analytics
+ * GET /dashboard - Comprehensive 360° Business Dashboard
+ * ✅ UPDATED: Includes JobPayments in sales analytics
  */
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { from, to } = req.query;
     const { start, end } = parseDateRange(from, to);
 
     // ============================================
-    // 1. SALES ANALYTICS (with money tracking)
+    // 1. SALES ANALYTICS (Job Payments + Standalone Sales)
+    // ✅ FIXED: Now includes job payments
     // ============================================
+    
+    // Query job payments
+    const jobPayments = await prisma.jobPayment.findMany({
+      where: {
+        date: {
+          gte: start,
+          lte: end,
+        },
+      },
+      include: {
+        job: {
+          include: {
+            vehicle: true,
+          },
+        },
+      },
+    });
+
+    // Query standalone sales
     const sales = await prisma.sale.findMany({
       where: {
         currentVersion: {
-          date: { gte: start, lte: end },
+          date: {
+            gte: start,
+            lte: end,
+          },
         },
       },
-      include: { currentVersion: true },
+      include: {
+        currentVersion: true,
+      },
     });
 
     let totalSalesPaise = 0;
     const salesByDate = new Map<string, number>();
     const salesByMode = new Map<string, number>();
-    const salesByReceiver = new Map<string, number>(); // ✅ NEW: Track money by owner
-    const salesByCategory = new Map<string, number>(); // ✅ NEW: Track sales by category
-    const moneyTracking = {
-      nitesh: 0,
-      tanmeet: 0,
-      bankAccount: 0,
-      untracked: 0,
-    };
+    const salesByReceiver = new Map<string, number>();
+    const salesByCategory = new Map<string, number>();
 
+    // ✅ Process job payments first
+    for (const payment of jobPayments) {
+      totalSalesPaise += payment.amount;
+
+      const date = payment.date.toISOString().slice(0, 10);
+      salesByDate.set(date, (salesByDate.get(date) || 0) + payment.amount);
+
+      salesByMode.set(payment.paymentMode, (salesByMode.get(payment.paymentMode) || 0) + payment.amount);
+
+      const receiver = payment.receivedBy || "Untracked";
+      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + payment.amount);
+
+      const category = "Job Payment";
+      salesByCategory.set(category, (salesByCategory.get(category) || 0) + payment.amount);
+    }
+
+    // ✅ Process standalone sales
     for (const s of sales) {
       const v = s.currentVersion;
       if (!v) continue;
 
       totalSalesPaise += v.amount;
 
-      // By date
-      const d = v.date.toISOString().slice(0, 10);
-      salesByDate.set(d, (salesByDate.get(d) || 0) + v.amount);
+      const date = v.date.toISOString().slice(0, 10);
+      salesByDate.set(date, (salesByDate.get(date) || 0) + v.amount);
 
-      // By payment mode
       salesByMode.set(v.paymentMode, (salesByMode.get(v.paymentMode) || 0) + v.amount);
 
-      // ✅ By category
-      const category = v.category || "Uncategorized";
+      const receiver = v.receivedBy || "Untracked";
+      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + v.amount);
+
+      const category = v.category || "General";
       salesByCategory.set(category, (salesByCategory.get(category) || 0) + v.amount);
-
-      // ✅ By receiver (for "Money by Owner" chart)
-      const receiverName = v.receivedBy || "Unknown";
-      salesByReceiver.set(receiverName, (salesByReceiver.get(receiverName) || 0) + v.amount);
-
-      // Money tracking
-      const receiver = v.receivedBy?.toLowerCase();
-      if (receiver === "nitesh") {
-        moneyTracking.nitesh += v.amount;
-      } else if (receiver === "tanmeet") {
-        moneyTracking.tanmeet += v.amount;
-      } else if (receiver === "bank account" || receiver === "bank") {
-        moneyTracking.bankAccount += v.amount;
-      } else {
-        moneyTracking.untracked += v.amount;
-      }
     }
 
     // ============================================
@@ -128,49 +159,73 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     let totalExpensesPaise = 0;
-    let advanceExpensesPaise = 0; // ✅ Track advance expenses separately
+    let totalEmployeeAdvancesPaise = 0;
     const expensesByDate = new Map<string, number>();
     const expensesByCategory = new Map<string, number>();
-    const expensesByVendor = new Map<string, number>(); // ✅ NEW: Track expenses by vendor
-    const expensesByMode = new Map<string, number>(); // ✅ NEW: Track payment modes
+    const expensesByPaidBy = new Map<string, number>();
+    const expensesByVendor = new Map<string, number>();
+    const employeeAdvances = new Map<string, number>();
 
     for (const e of expenses) {
       const v = e.currentVersion;
       if (!v) continue;
 
-      totalExpensesPaise += v.amount;
+      const isEmployeeAdvance = v.category === "Employee Advance";
 
-      // Track advances
-      if (v.category?.toLowerCase().includes("advance")) {
-        advanceExpensesPaise += v.amount;
-      }
+      if (isEmployeeAdvance) {
+        // ✅ Track employee advances separately
+        totalEmployeeAdvancesPaise += v.amount;
+        const employeeName = v.vendor || "Unknown Employee";
+        employeeAdvances.set(employeeName, (employeeAdvances.get(employeeName) || 0) + v.amount);
+      } else {
+        // ✅ Track regular expenses only
+        totalExpensesPaise += v.amount;
 
-      const d = v.date.toISOString().slice(0, 10);
-      expensesByDate.set(d, (expensesByDate.get(d) || 0) + v.amount);
+        const date = v.date.toISOString().slice(0, 10);
+        expensesByDate.set(date, (expensesByDate.get(date) || 0) + v.amount);
 
-      const cat = v.category || "Uncategorized";
-      expensesByCategory.set(cat, (expensesByCategory.get(cat) || 0) + v.amount);
+        const category = v.category || "General";
+        expensesByCategory.set(category, (expensesByCategory.get(category) || 0) + v.amount);
 
-      // ✅ By vendor
-      const vendorName = v.vendor || "No Vendor";
-      expensesByVendor.set(vendorName, (expensesByVendor.get(vendorName) || 0) + v.amount);
+        const paidBy = parsePaidBy(v.note) || "Untracked";
+        expensesByPaidBy.set(paidBy, (expensesByPaidBy.get(paidBy) || 0) + v.amount);
 
-      // ✅ By payment mode
-      if (v.paymentMode) {
-        expensesByMode.set(v.paymentMode, (expensesByMode.get(v.paymentMode) || 0) + v.amount);
+        const vendor = v.vendor || "Direct";
+        expensesByVendor.set(vendor, (expensesByVendor.get(vendor) || 0) + v.amount);
       }
     }
 
-    const netProfitPaise = totalSalesPaise - totalExpensesPaise;
+    // ============================================
+    // 3. CASH FLOW TRACKING
+    // ============================================
+    const cashFlow: any = {
+      Nitesh: { received: 0, paid: 0, net: 0 },
+      Tanmeet: { received: 0, paid: 0, net: 0 },
+      "Bank Account": { received: 0, paid: 0, net: 0 },
+    };
+
+    salesByReceiver.forEach((amount, person) => {
+      if (cashFlow[person]) cashFlow[person].received += amount;
+    });
+
+    expensesByPaidBy.forEach((amount, person) => {
+      if (cashFlow[person]) cashFlow[person].paid += amount;
+    });
+
+    Object.keys(cashFlow).forEach((person) => {
+      cashFlow[person].net = cashFlow[person].received - cashFlow[person].paid;
+      cashFlow[person].received = paiseToRupees(cashFlow[person].received);
+      cashFlow[person].paid = paiseToRupees(cashFlow[person].paid);
+      cashFlow[person].net = paiseToRupees(cashFlow[person].net);
+    });
 
     // ============================================
-    // 3. JOB CARDS ANALYTICS
+    // 4. JOB CARDS ANALYTICS
     // ============================================
     const jobCards = await prisma.jobCard.findMany({
-      where: {
-        inDate: { gte: start, lte: end },
-      },
+      where: { inDate: { gte: start, lte: end } },
       include: {
+        vehicle: true,
         lineItems: true,
         payments: true,
       },
@@ -186,116 +241,153 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       totalRevenue: 0,
       totalAdvances: 0,
       totalPending: 0,
+      avgJobValue: 0,
+      labourTotal: 0,
+      partsTotal: 0,
     };
 
-    const jobsByTemplate = new Map<string, number>();
+    const jobsByStatus = new Map<string, number>();
+    const jobsByMake = new Map<string, number>();
+    const topCustomers = new Map<string, { count: number; revenue: number }>();
 
     for (const job of jobCards) {
-      // Status count
       jobStats[job.status.toLowerCase() as keyof typeof jobStats]++;
-
       jobStats.totalRevenue += job.grandTotal;
       jobStats.totalAdvances += job.advancePaid;
       jobStats.totalPending += job.pendingAmount;
+      jobStats.labourTotal += job.labourTotal;
+      jobStats.partsTotal += job.partsTotal;
 
-      // By template
-      const template = "GENERAL"; // templateUsed property doesn't exist in schema
-      jobsByTemplate.set(template, (jobsByTemplate.get(template) || 0) + 1);
+      jobsByStatus.set(job.status, (jobsByStatus.get(job.status) || 0) + 1);
+
+      if (job.vehicle?.make) {
+        jobsByMake.set(job.vehicle.make, (jobsByMake.get(job.vehicle.make) || 0) + 1);
+      }
+
+      const customer = job.customerName;
+      if (customer) {
+        const existing = topCustomers.get(customer) || { count: 0, revenue: 0 };
+        topCustomers.set(customer, {
+          count: existing.count + 1,
+          revenue: existing.revenue + job.grandTotal,
+        });
+      }
     }
 
+    jobStats.avgJobValue = jobStats.total > 0 ? jobStats.totalRevenue / jobStats.total : 0;
+
     // ============================================
-    // 4. VENDOR ANALYTICS
+    // 5. VENDOR ANALYTICS
     // ============================================
     const vendors = await prisma.vendor.findMany({
-      where: { isActive: true },
       include: {
         payments: {
-          where: {
-            date: { gte: start, lte: end },
-          },
+          where: { date: { gte: start, lte: end } },
         },
       },
     });
 
     let totalVendorDue = 0;
-    const vendorPaymentsByStatus = {
-      pending: 0,
-      partial: 0,
-      paid: 0,
+    let totalVendorPayments = 0;
+    const vendorStats = {
+      totalActive: 0,
+      totalInactive: 0,
+      pendingPayments: 0,
+      partialPayments: 0,
+      paidPayments: 0,
     };
 
-    let totalVendorPayments = 0;
+    const topVendorsDue: any[] = [];
 
     for (const vendor of vendors) {
+      if (vendor.isActive) vendorStats.totalActive++;
+      else vendorStats.totalInactive++;
+
       totalVendorDue += vendor.totalDue;
 
       for (const payment of vendor.payments) {
-        totalVendorPayments += payment.amount;
-        vendorPaymentsByStatus[payment.status.toLowerCase() as keyof typeof vendorPaymentsByStatus]++;
+        totalVendorPayments += payment.amountPaid;
+        if (payment.status === "PENDING") vendorStats.pendingPayments++;
+        else if (payment.status === "PARTIAL") vendorStats.partialPayments++;
+        else if (payment.status === "PAID") vendorStats.paidPayments++;
+      }
+
+      if (vendor.payments.length > 0 || vendor.totalDue > 0) {
+        topVendorsDue.push({
+          id: vendor.id,
+          name: vendor.name,
+          totalDue: paiseToRupees(vendor.totalDue),
+          paymentsCount: vendor.payments.length,
+        });
       }
     }
 
-    const topVendorsDue = vendors
-      .filter((v) => v.totalDue > 0)
-      .sort((a, b) => b.totalDue - a.totalDue)
-      .slice(0, 5)
-      .map((v) => ({
-        id: v.id,
-        name: v.name,
-        totalDue: paiseToRupees(v.totalDue),
-        paymentsCount: v.payments.length,
-      }));
+    topVendorsDue.sort((a, b) => b.totalDue - a.totalDue);
 
     // ============================================
-    // 5. EMPLOYEE & PAYROLL
+    // 6. EMPLOYEE & PAYROLL
     // ============================================
-    const activeEmployees = await prisma.employee.findMany({
-      where: { isActive: true },
-      select: { id: true, name: true, baseSalary: true },
-    });
-
-    const salaryLiabilityPaise = activeEmployees.reduce(
-      (sum, emp) => sum + emp.baseSalary,
-      0
-    );
-
-    const advances = await prisma.advance.findMany({
-      where: {
-        date: { gte: start, lte: end },
-      },
+    const employees = await prisma.employee.findMany({
       include: {
-        employee: {
-          select: { id: true, name: true },
+        advances: {
+          where: { date: { gte: start, lte: end } },
+        },
+        attendances: {
+          where: { date: { gte: start, lte: end } },
         },
       },
-      orderBy: { date: "asc" },
     });
 
-    const totalAdvancesPaise = advances.reduce((sum, a) => sum + a.amount, 0);
+    let totalSalaryLiability = 0;
+    let totalAdvances = 0;
+    const employeeStats = {
+      active: 0,
+      inactive: 0,
+      totalAdvances: 0,
+    };
 
-    const advancesByEmployee: {
-      [employeeId: number]: {
-        employeeId: number;
-        employeeName: string;
-        totalAdvances: number;
-      };
-    } = {};
+    const advancesByEmployee: any[] = [];
+    const attendanceStats = {
+      present: 0,
+      absent: 0,
+      paidLeave: 0,
+      unpaidLeave: 0,
+    };
 
-    for (const adv of advances) {
-      if (!adv.employee) continue;
-      const empId = adv.employee.id;
-      if (!advancesByEmployee[empId]) {
-        advancesByEmployee[empId] = {
-          employeeId: empId,
-          employeeName: adv.employee.name,
-          totalAdvances: 0,
-        };
+    for (const emp of employees) {
+      if (emp.isActive) {
+        employeeStats.active++;
+        totalSalaryLiability += emp.baseSalary;
+      } else {
+        employeeStats.inactive++;
       }
-      advancesByEmployee[empId].totalAdvances += paiseToRupees(adv.amount);
+
+      let empAdvances = 0;
+      for (const adv of emp.advances) {
+        empAdvances += adv.amount;
+        totalAdvances += adv.amount;
+      }
+
+      if (empAdvances > 0) {
+        advancesByEmployee.push({
+          employeeId: emp.id,
+          employeeName: emp.name,
+          totalAdvances: paiseToRupees(empAdvances),
+        });
+      }
+
+      for (const att of emp.attendances) {
+        if (att.status === "PRESENT") attendanceStats.present++;
+        else if (att.status === "ABSENT") attendanceStats.absent++;
+        else if (att.status === "PAID_LEAVE") attendanceStats.paidLeave++;
+        else if (att.status === "UNPAID_LEAVE") attendanceStats.unpaidLeave++;
+      }
     }
 
+    advancesByEmployee.sort((a, b) => b.totalAdvances - a.totalAdvances);
+
     // ============================================
-    // 6. INVENTORY
+    // 7. INVENTORY ANALYTICS
     // ============================================
     const inventoryItems = await prisma.inventoryItem.findMany({
       include: {
@@ -305,10 +397,26 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       },
     });
 
-    const lowStockItems = inventoryItems
-      .map((item: any) => {
-        const currentStock = computeCurrentStockForItem(item.stockTransactions);
-        return {
+    const inventoryStats = {
+      totalItems: inventoryItems.length,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+    };
+
+    const lowStockItems: any[] = [];
+    const inventoryByCategory = new Map<string, number>();
+
+    for (const item of inventoryItems) {
+      const currentStock = computeCurrentStockForItem(item.stockTransactions);
+
+      const category = item.category || "Uncategorized";
+      inventoryByCategory.set(category, (inventoryByCategory.get(category) || 0) + 1);
+
+      if (currentStock === 0) {
+        inventoryStats.outOfStockCount++;
+      } else if (currentStock <= item.minStock) {
+        inventoryStats.lowStockCount++;
+        lowStockItems.push({
           id: item.id,
           name: item.name,
           category: item.category,
@@ -316,286 +424,220 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
           unit: item.unit,
           minStock: item.minStock,
           currentStock,
-        };
-      })
-      .filter((i: any) => i.currentStock <= i.minStock)
-      .sort((a: any, b: any) => a.currentStock - b.currentStock);
+        });
+      }
+    }
+
+    lowStockItems.sort((a, b) => a.currentStock - b.currentStock);
 
     // ============================================
-    // 7. RECENT ACTIVITY
+    // 8. RECENT ACTIVITY
     // ============================================
     const auditLogs = await prisma.auditLog.findMany({
       orderBy: { timestamp: "desc" },
       take: 20,
       include: {
-        user: {
-          select: { id: true, name: true, email: true },
-        },
+        user: { select: { id: true, name: true } },
       },
     });
 
     const recentActivity = auditLogs.map((log: any) => ({
-      id: log.id,
-      timestamp: log.timestamp,
-      user: log.user
-        ? { id: log.user.id, name: log.user.name, email: log.user.email }
-        : null,
-      entityType: log.entityType,
-      entityId: log.entityId,
       action: log.action,
-      summary: log.summary,
+      summary: log.summary || `${log.action} on ${log.entityType}`,
+      createdAt: log.timestamp,
+      user: log.user?.name || "System",
     }));
 
     // ============================================
-    // 8. PREPARE CHART DATA
+    // 9. TRENDS & CHARTS
     // ============================================
     const datesSet = new Set<string>();
-    for (const d of salesByDate.keys()) datesSet.add(d);
-    for (const d of expensesByDate.keys()) datesSet.add(d);
-    const allDates = Array.from(datesSet).sort();
+    salesByDate.forEach((_, date) => datesSet.add(date));
+    expensesByDate.forEach((_, date) => datesSet.add(date));
 
-    const timeseries = allDates.map((d) => ({
-      date: d,
-      sales: paiseToRupees(salesByDate.get(d) || 0),
-      expenses: paiseToRupees(expensesByDate.get(d) || 0),
-      profit: paiseToRupees((salesByDate.get(d) || 0) - (expensesByDate.get(d) || 0)),
+    const allDates = Array.from(datesSet).sort();
+    const dailyTrends = allDates.map((date) => ({
+      date,
+      sales: paiseToRupees(salesByDate.get(date) || 0),
+      expenses: paiseToRupees(expensesByDate.get(date) || 0),
+      profit: paiseToRupees((salesByDate.get(date) || 0) - (expensesByDate.get(date) || 0)),
     }));
 
-    // ✅ Sales analytics with percentages
-    const salesByPaymentMode = Array.from(salesByMode.entries()).map(
-      ([mode, amount]) => ({
-        mode,
-        amount: paiseToRupees(amount),
-        percentage: totalSalesPaise > 0 ? amount / totalSalesPaise : 0,
-      })
-    );
-
-    const salesByCategoryChart = Array.from(salesByCategory.entries())
-      .map(([category, amount]) => ({
-        category,
-        amount: paiseToRupees(amount),
-        percentage: totalSalesPaise > 0 ? amount / totalSalesPaise : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount);
-
-    const salesByReceiverChart = Array.from(salesByReceiver.entries())
-      .map(([receiver, amount]) => ({
-        receiver,
-        amount: paiseToRupees(amount),
-        percentage: totalSalesPaise > 0 ? amount / totalSalesPaise : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount);
-
-    // ✅ Expenses analytics with percentages
-    const expensesByCategoryChart = Array.from(expensesByCategory.entries())
-      .map(([category, amount]) => ({
-        category,
-        amount: paiseToRupees(amount),
-        percentage: totalExpensesPaise > 0 ? amount / totalExpensesPaise : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount);
-
-    const expensesByVendorChart = Array.from(expensesByVendor.entries())
-      .map(([vendor, amount]) => ({
-        vendor,
-        amount: paiseToRupees(amount),
-        percentage: totalExpensesPaise > 0 ? amount / totalExpensesPaise : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount);
-
-    const expensesByPaymentMode = Array.from(expensesByMode.entries()).map(
-      ([mode, amount]) => ({
-        mode,
-        amount: paiseToRupees(amount),
-        percentage: totalExpensesPaise > 0 ? amount / totalExpensesPaise : 0,
-      })
-    );
-
-    // ✅ Convert job template from array to object for frontend
-    const jobsByTemplateObj: Record<string, number> = {};
-    jobsByTemplate.forEach((count, template) => {
-      jobsByTemplateObj[template] = count;
-    });
-
     // ============================================
-    // RESPONSE - Frontend Compatible Format
+    // 10. COMPREHENSIVE RESPONSE
     // ============================================
-    const response = {
+    const netProfit = totalSalesPaise - totalExpensesPaise;
+
+    return res.json({
       range: {
         from: start.toISOString(),
         to: end.toISOString(),
       },
+
+      // Core KPIs
       kpis: {
         totalSales: paiseToRupees(totalSalesPaise),
         totalExpenses: paiseToRupees(totalExpensesPaise),
-        netProfit: paiseToRupees(netProfitPaise),
-        profitMargin: totalSalesPaise > 0 ? netProfitPaise / totalSalesPaise : 0,
-        expenseRatio: totalSalesPaise > 0 ? totalExpensesPaise / totalSalesPaise : 0,
-        salaryLiability: paiseToRupees(salaryLiabilityPaise),
-        totalAdvances: paiseToRupees(totalAdvancesPaise),
-        cashIn: paiseToRupees(totalSalesPaise),
-        cashOut: paiseToRupees(totalExpensesPaise),
-        netCashFlow: paiseToRupees(netProfitPaise),
+        netProfit: paiseToRupees(netProfit),
+        profitMargin: totalSalesPaise > 0 ? (netProfit / totalSalesPaise) * 100 : 0,
+        expenseRatio: totalSalesPaise > 0 ? (totalExpensesPaise / totalSalesPaise) * 100 : 0,
+        totalAdvances: paiseToRupees(totalAdvances),
+        salaryLiability: paiseToRupees(totalSalaryLiability),
+        vendorDue: paiseToRupees(totalVendorDue),
       },
-      // ✅ Sales breakdown
+
+      // Sales breakdown
       sales: {
         total: paiseToRupees(totalSalesPaise),
-        count: sales.length,
-        byCategory: salesByCategoryChart,
-        byPaymentMode: salesByPaymentMode,
-        byReceiver: salesByReceiverChart, // ✅ Money by owner
+        count: sales.length + jobPayments.length,
+        avgSale: (sales.length + jobPayments.length) > 0 ? paiseToRupees(totalSalesPaise) / (sales.length + jobPayments.length) : 0,
+        byPaymentMode: Array.from(salesByMode.entries())
+          .map(([mode, amount]) => ({
+            mode,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byReceiver: Array.from(salesByReceiver.entries())
+          .map(([receiver, amount]) => ({
+            receiver,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byCategory: Array.from(salesByCategory.entries())
+          .map(([category, amount]) => ({
+            category,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
       },
-      // ✅ Expenses breakdown
+
+      // Expenses breakdown (excluding employee advances)
       expenses: {
         total: paiseToRupees(totalExpensesPaise),
-        count: expenses.length,
-        advanceExpenses: paiseToRupees(advanceExpensesPaise),
-        otherExpenses: paiseToRupees(totalExpensesPaise - advanceExpensesPaise),
-        byCategory: expensesByCategoryChart,
-        byPaymentMode: expensesByPaymentMode,
-        byVendor: expensesByVendorChart, // ✅ Top vendors by expense
+        count: expenses.length - employeeAdvances.size,
+        avgExpense: (expenses.length - employeeAdvances.size) > 0 
+          ? paiseToRupees(totalExpensesPaise) / (expenses.length - employeeAdvances.size) 
+          : 0,
+        byCategory: Array.from(expensesByCategory.entries())
+          .map(([category, amount]) => ({
+            category,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byPaidBy: Array.from(expensesByPaidBy.entries())
+          .map(([paidBy, amount]) => ({
+            paidBy,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byVendor: Array.from(expensesByVendor.entries())
+          .map(([vendor, amount]) => ({
+            vendor,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount)
+          .slice(0, 10),
       },
-      // ✅ Job cards with proper format
-      jobCards: {
-        ...jobStats,
-        totalRevenue: paiseToRupees(jobStats.totalRevenue),
-        totalAdvances: paiseToRupees(jobStats.totalAdvances),
-        totalPending: paiseToRupees(jobStats.totalPending),
-        byTemplate: jobsByTemplateObj, // ✅ Object format instead of array
-      },
-      // ✅ Vendor dues
-      vendors: {
-        totalActive: vendors.filter((v) => v.isActive).length,
-        totalDue: paiseToRupees(totalVendorDue),
-        paymentsByStatus: vendorPaymentsByStatus,
-        topVendorsDue,
-      },
-      // ✅ Money tracking
-      moneyTracking: {
-        nitesh: paiseToRupees(moneyTracking.nitesh),
-        tanmeet: paiseToRupees(moneyTracking.tanmeet),
-        bankAccount: paiseToRupees(moneyTracking.bankAccount),
-        untracked: paiseToRupees(moneyTracking.untracked),
-      },
-      // ✅ Jobs overview (original format kept for compatibility)
-      jobs: {
-        total: jobStats.total,
-        byStatus: Object.entries(jobStats as any)
-          .filter(([key]) => !["total", "open", "inProgress", "ready", "delivered", "cancelled", "totalRevenue", "totalAdvances", "totalPending"].includes(key))
-          .reduce((acc, [key, value]) => {acc[key] = value as number;return acc;}, {} as Record<string, number>),
-        totalRevenue: paiseToRupees(jobStats.totalRevenue),
-        totalPending: paiseToRupees(jobStats.totalPending),
-        totalAdvances: paiseToRupees(jobStats.totalAdvances),
-        avgJobValue: jobStats.total > 0 ? paiseToRupees(jobStats.totalRevenue) / jobStats.total : 0,
-        overdueCount: 0, // Would need additional calculation
-        byMake: [], // Would need additional data
-        labourVsParts: {
-          labour: 0,
-          parts: 0,
-          labourPercentage: 0,
-          partsPercentage: 0,
-        },
-        paymentsByMode: [],
-      },
-      // ✅ Employees
-      employees: {
-        activeCount: activeEmployees.length,
-        totalSalaryLiability: paiseToRupees(salaryLiabilityPaise),
-        advances: Object.values(advancesByEmployee),
-        totalAdvances: paiseToRupees(totalAdvancesPaise),
-      },
-      // ✅ Inventory
-      inventory: {
-        totalItems: lowStockItems.length, // This should ideally count all items
-        lowStockCount: lowStockItems.length,
-        lowStockItems,
-        byCategory: [],
-      },
-      // ✅ Trends
-      trends: {
-        daily: timeseries,
-      },
-      // ✅ Top customers (placeholder - would need query)
-      topCustomers: [],
-    };
 
-    return res.json(response);
+      // Employee advances (separate from expenses)
+      employeeAdvances: {
+        total: paiseToRupees(totalEmployeeAdvancesPaise),
+        count: employeeAdvances.size,
+        byEmployee: Array.from(employeeAdvances.entries())
+          .map(([name, amount]) => ({
+            name,
+            amount: paiseToRupees(amount),
+            percentage: totalEmployeeAdvancesPaise > 0 
+              ? (amount / totalEmployeeAdvancesPaise) * 100 
+              : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+      },
+
+      // Cash flow by person
+      cashFlow,
+
+      // Job cards
+      jobCards: {
+        total: jobStats.total,
+        byStatus: {
+          open: jobStats.open,
+          inProgress: jobStats.inProgress,
+          ready: jobStats.ready,
+          delivered: jobStats.delivered,
+          cancelled: jobStats.cancelled,
+        },
+        revenue: {
+          total: paiseToRupees(jobStats.totalRevenue),
+          advances: paiseToRupees(jobStats.totalAdvances),
+          pending: paiseToRupees(jobStats.totalPending),
+          avgJobValue: paiseToRupees(jobStats.avgJobValue),
+        },
+        composition: {
+          labour: paiseToRupees(jobStats.labourTotal),
+          parts: paiseToRupees(jobStats.partsTotal),
+          labourPercentage:
+            jobStats.totalRevenue > 0 ? (jobStats.labourTotal / jobStats.totalRevenue) * 100 : 0,
+          partsPercentage:
+            jobStats.totalRevenue > 0 ? (jobStats.partsTotal / jobStats.totalRevenue) * 100 : 0,
+        },
+        byMake: Array.from(jobsByMake.entries())
+          .map(([make, count]) => ({ make, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 5),
+        topCustomers: Array.from(topCustomers.entries())
+          .map(([name, data]) => ({
+            name,
+            jobCount: data.count,
+            totalRevenue: paiseToRupees(data.revenue),
+          }))
+          .sort((a, b) => b.totalRevenue - a.totalRevenue)
+          .slice(0, 10),
+      },
+
+      // Vendors
+      vendors: {
+        stats: vendorStats,
+        totalDue: paiseToRupees(totalVendorDue),
+        totalPayments: paiseToRupees(totalVendorPayments),
+        topDue: topVendorsDue.slice(0, 10),
+      },
+
+      // Employees
+      employees: {
+        stats: employeeStats,
+        salaryLiability: paiseToRupees(totalSalaryLiability),
+        totalAdvances: paiseToRupees(totalAdvances),
+        advancesByEmployee: advancesByEmployee.slice(0, 10),
+        attendance: attendanceStats,
+      },
+
+      // Inventory
+      inventory: {
+        stats: inventoryStats,
+        lowStockItems: lowStockItems.slice(0, 10),
+        byCategory: Array.from(inventoryByCategory.entries()).map(([category, count]) => ({
+          category,
+          count,
+        })),
+      },
+
+      // Trends
+      trends: {
+        daily: dailyTrends,
+      },
+
+      // Recent activity
+      activity: recentActivity,
+    });
   } catch (err) {
     console.error("Dashboard error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-// ✅ NEW: Helper to parse paidBy from note field
-function parsePaidBy(note: string | null): string | null {
-  if (!note) return null;
-  const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
-  return match ? (match[1] || null) : null;  // ✅ FIXED
-}
-
-/**
- * GET /dashboard/cashflow
- * ✅ NEW: Returns cash flow summary by person
- * Shows who received money (sales) and who paid money (expenses)
- */
-router.get("/cashflow", authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const { from, to } = req.query;
-    
-    // Build date filter
-    const dateFilter: any = {};
-    if (from) dateFilter.gte = new Date(from as string);
-    if (to) {
-      const endDate = new Date(to as string);
-      endDate.setHours(23, 59, 59, 999);
-      dateFilter.lte = endDate;
-    }
-    
-    const whereClause = Object.keys(dateFilter).length > 0 ? { date: dateFilter } : undefined;
-    
-    // Get all sales (money received)
-    const sales = await prisma.saleVersion.findMany({
-      where: whereClause,
-      select: { receivedBy: true, amount: true },
-    });
-    
-    // Get all expenses (money paid)
-    const expenses = await prisma.expenseVersion.findMany({
-      where: whereClause,
-      select: { note: true, amount: true },
-    });
-    
-    // Initialize cash flow object
-    const cashFlow: any = {
-      Nitesh: { received: 0, paid: 0, net: 0 },
-      Tanmeet: { received: 0, paid: 0, net: 0 },
-      "Bank Account": { received: 0, paid: 0, net: 0 },
-    };
-    
-    // Process sales (money received)
-    sales.forEach(sale => {
-      const person = sale.receivedBy || "Nitesh"; // Default to Nitesh if not specified
-      if (cashFlow[person]) {
-        cashFlow[person].received += sale.amount;
-      }
-    });
-    
-    // Process expenses (money paid)
-    expenses.forEach(expense => {
-      const paidBy = parsePaidBy(expense.note);
-      if (paidBy && cashFlow[paidBy]) {
-        cashFlow[paidBy].paid += expense.amount;
-      }
-    });
-    
-    // Calculate net for each person
-    Object.keys(cashFlow).forEach(person => {
-      cashFlow[person].net = cashFlow[person].received - cashFlow[person].paid;
-    });
-    
-    return res.json(cashFlow);
-  } catch (err) {
-    console.error("Cash flow error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 });
