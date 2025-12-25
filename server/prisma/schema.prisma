@@ -1,0 +1,779 @@
+// ✅ CHANGES:
+// 1. Added relatedExpenseId to Advance model (link advance to expense)
+// 2. Added receivedBy to SaleVersion model (track who received payment)
+// 3. Added payment tracking to Payslip model (paidDate, paymentMode, paidNote, relatedExpenseId)
+//    - Track when salary was paid
+//    - Track payment mode (CASH, BANK, etc.)
+//    - Track who paid salary (stored in paidNote as [PAID_BY:X])
+//    - Link to auto-created expense
+// 4. ✅ ADDED: Vendor and VendorPayment models with enums
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/**
+ * ========== Enums ==========
+ */
+
+enum PaymentMode {
+  CASH
+  UPI
+  CARD
+  BANK
+  OTHER
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  UNPAID_LEAVE
+  PAID_LEAVE
+}
+
+enum PayrollStatus {
+  OPEN
+  CLOSED
+}
+
+enum StockTransactionType {
+  IN
+  OUT
+}
+
+enum EntityType {
+  USER
+  EMPLOYEE
+  ADVANCE
+  PAYROLL_PERIOD
+  PAYSLIP
+  INVENTORY_ITEM
+  STOCK_TRANSACTION
+  SALE
+  EXPENSE
+  VEHICLE
+  JOB_CARD
+  JOB_PAYMENT
+  ATTACHMENT
+  INSPECTION_TEMPLATE
+  JOB_INSPECTION
+  REMINDER
+  VENDOR          // ✅ Added for audit log compatibility
+  VENDOR_PAYMENT  // ✅ Added for audit log compatibility
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  CLOSE_PAYROLL
+  LOGIN
+}
+
+/**
+ * Job / Workshop specific enums
+ */
+
+enum JobStatus {
+  OPEN
+  IN_PROGRESS
+  READY
+  DELIVERED
+  CANCELLED
+}
+
+enum JobLineType {
+  LABOUR
+  PART
+  OTHER
+}
+
+enum JobPaymentType {
+  ADVANCE
+  FINAL
+  REFUND
+}
+
+enum InspectionTemplateKind {
+  GENERAL_SERVICE
+  AC_SERVICE
+  BRAKE_JOB
+  CUSTOM
+}
+
+enum InspectionType {
+  ARRIVAL
+  DELIVERY
+  OTHER
+}
+
+enum InspectionItemStatus {
+  OK
+  NOT_OK
+  NA
+  ATTENTION
+}
+
+enum AttachmentType {
+  PHOTO
+  DOCUMENT
+}
+
+enum AttachmentCategory {
+  ARRIVAL_DAMAGE
+  BEFORE_REPAIR
+  AFTER_REPAIR
+  INSURANCE_DOC
+  RC_COPY
+  OTHER_DOC
+}
+
+enum ReminderType {
+  NEXT_SERVICE
+  INSURANCE_EXPIRY
+  PUC_EXPIRY
+  OTHER
+}
+
+enum ReminderChannel {
+  SMS
+  WHATSAPP
+  CALL
+  OTHER
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  CANCELLED
+}
+
+/**
+ * ✅ NEW: Template & Vendor Enums
+ */
+
+enum TemplateCategory {
+  WASHING
+  DECOR
+  MECHANICAL
+  DENTING_PAINTING
+  GENERAL
+  CUSTOM
+}
+
+enum TemplateLineType {
+  LABOUR
+  PART
+  OTHER
+}
+
+enum VendorPaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+/**
+ * ========== Users (Owners only) ==========
+ */
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs       AuditLog[]       @relation("UserAuditLogs")
+  saleVersions    SaleVersion[]
+  expenseVersions ExpenseVersion[]
+  advances        Advance[]
+
+  // Back relation for PayrollPeriod.closedBy
+  closedPayrollPeriods PayrollPeriod[] @relation("PayrollPeriodClosedBy")
+}
+
+/**
+ * ========== Employees & Payroll ==========
+ */
+
+model Employee {
+  id         Int       @id @default(autoincrement())
+  name       String
+  phone      String?
+  address    String?
+  joinDate   DateTime?
+  baseSalary Int // paise
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  advances    Advance[]
+  payslips    Payslip[]
+  attendances Attendance[]
+}
+
+model Attendance {
+  id         Int      @id @default(autoincrement())
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  employeeId Int
+
+  date   DateTime
+  status AttendanceStatus
+  reason String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([employeeId, date])
+  @@index([date])
+}
+
+model Advance {
+  id          Int         @id @default(autoincrement())
+  employee    Employee    @relation(fields: [employeeId], references: [id])
+  employeeId  Int
+  amount      Int // paise
+  date        DateTime
+  paymentMode PaymentMode
+  note        String?
+
+  createdBy   User? @relation(fields: [createdById], references: [id])
+  createdById Int?
+
+  // ✅ FEATURE 1: Link to auto-created expense
+  relatedExpense   Expense? @relation(fields: [relatedExpenseId], references: [id])
+  relatedExpenseId Int?     @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([employeeId, date])
+}
+
+model PayrollPeriod {
+  id        Int           @id @default(autoincrement())
+  name      String        @unique // e.g. "2025-12"
+  startDate DateTime
+  endDate   DateTime
+  status    PayrollStatus @default(OPEN)
+  createdAt DateTime      @default(now())
+  closedAt  DateTime?
+
+  // Named relation to User (closedBy)
+  closedBy   User? @relation("PayrollPeriodClosedBy", fields: [closedById], references: [id])
+  closedById Int?
+
+  payslips Payslip[]
+}
+
+model Payslip {
+  id              Int           @id @default(autoincrement())
+  payrollPeriod   PayrollPeriod @relation(fields: [payrollPeriodId], references: [id])
+  payrollPeriodId Int
+
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  employeeId Int
+
+  // Attendance / unpaid leave
+  unpaidLeaveDays      Int @default(0)
+  unpaidLeaveDeduction Int @default(0) // paise
+
+  grossSalary     Int // paise
+  totalAdvances   Int // paise, for this period
+  otherDeductions Int @default(0)
+  allowances      Int @default(0)
+  netPay          Int // paise
+
+  generatedAt DateTime @default(now())
+
+  // ✅ NEW: Payment tracking fields
+  paidDate         DateTime? // When salary was paid
+  paymentMode      String?   // CASH, BANK, UPI, etc.
+  paidNote         String?   // Contains [PAID_BY:X] prefix + optional note
+  relatedExpenseId Int?      // Link to auto-created expense
+  relatedExpense   Expense?  @relation("PayslipExpense", fields: [relatedExpenseId], references: [id])
+
+  @@unique([payrollPeriodId, employeeId])
+}
+
+/**
+ * ========== Inventory ==========
+ */
+
+model InventoryItem {
+  id        Int      @id @default(autoincrement())
+  name      String
+  category  String?
+  sku       String?
+  brand     String?
+  unit      String?
+  minStock  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stockTransactions StockTransaction[]
+  jobLineItems      JobLineItem[]
+  templateItems     JobCardTemplateItem[]
+}
+
+model StockTransaction {
+  id     Int           @id @default(autoincrement())
+  item   InventoryItem @relation(fields: [itemId], references: [id])
+  itemId Int
+
+  type      StockTransactionType
+  quantity  Int
+  unitPrice Int? // cost per unit (for IN)
+  reason    String?
+
+  relatedExpense   Expense? @relation(fields: [relatedExpenseId], references: [id])
+  relatedExpenseId Int?
+
+  date      DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([itemId, date])
+}
+
+/**
+ * ========== Sales (versioned) ==========
+ */
+
+model Sale {
+  id               Int          @id @default(autoincrement())
+  currentVersionId Int?         @unique
+  currentVersion   SaleVersion? @relation("SaleCurrent", fields: [currentVersionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  versions SaleVersion[] @relation("SaleHistory")
+
+  // Link back to job card (optional, for job-based sales)
+  jobCard   JobCard? @relation("JobCardSales", fields: [jobCardId], references: [id])
+  jobCardId Int?
+  
+  @@index([jobCardId])
+}
+
+model SaleVersion {
+  id Int @id @default(autoincrement())
+
+  // History relation
+  sale   Sale @relation("SaleHistory", fields: [saleId], references: [id])
+  saleId Int
+
+  // Back-reference for currentVersion
+  currentOfSale Sale? @relation("SaleCurrent")
+
+  versionNumber Int
+
+  date        DateTime
+  amount      Int // paise
+  category    String?
+  paymentMode PaymentMode
+  reference   String?
+  note        String?
+
+  // ✅ FEATURE 2: Track who received the payment
+  receivedBy String? // "Nitesh" | "Tanmeet" | "Bank Account"
+
+  createdBy   User? @relation(fields: [createdById], references: [id])
+  createdById Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([saleId, versionNumber])
+  @@index([date])
+}
+
+/**
+ * ========== Expenses (versioned) ==========
+ */
+
+model Expense {
+  id               Int             @id @default(autoincrement())
+  currentVersionId Int?            @unique
+  currentVersion   ExpenseVersion? @relation("ExpenseCurrent", fields: [currentVersionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  versions          ExpenseVersion[]   @relation("ExpenseHistory")
+  stockTransactions StockTransaction[]
+  
+  // ✅ FEATURE 1: Back-reference from Advance
+  linkedAdvance Advance?
+  
+  // ✅ FEATURE 2: Back-reference from Payslip (many-to-one)
+  linkedPayslips Payslip[] @relation("PayslipExpense")
+  
+  // ✅ NEW: Back-reference from VendorPayment
+  linkedVendorPayment VendorPayment?
+}
+
+model ExpenseVersion {
+  id Int @id @default(autoincrement())
+
+  expense   Expense @relation("ExpenseHistory", fields: [expenseId], references: [id])
+  expenseId Int
+
+  currentOfExpense Expense? @relation("ExpenseCurrent")
+
+  versionNumber Int
+
+  date        DateTime
+  amount      Int // paise
+  category    String?
+  vendor      String?
+  paymentMode PaymentMode
+  reference   String?
+  note        String?
+
+  createdBy   User? @relation(fields: [createdById], references: [id])
+  createdById Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([expenseId, versionNumber])
+  @@index([date])
+}
+
+/**
+ * ========== Vehicles & Job Cards ==========
+ */
+
+model Vehicle {
+  id        Int     @id @default(autoincrement())
+  regNumber String  @unique // e.g. KA-01-AB-1234
+  make      String?
+  model     String? // Vehicle model name (e.g., "Kia Sonet", "Maruti Baleno")
+  variant   String?
+  fuelType  String? // e.g. "Petrol", "Diesel"
+  year      Int?
+  color     String?
+
+  ownerName  String
+  ownerPhone String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobCards    JobCard[]
+  attachments Attachment[] @relation("VehicleAttachments")
+  reminders   Reminder[]
+}
+
+model JobCard {
+  id        Int    @id @default(autoincrement())
+  jobNumber String @unique // e.g. "JC-2025-0001"
+
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  vehicleId Int
+
+  customerName  String
+  customerPhone String?
+
+  inDate       DateTime  @default(now())
+  promisedDate DateTime?
+  status       JobStatus @default(OPEN)
+
+  odometer  Int?
+  fuelLevel String? // e.g. "1/4", "Half", "Full"
+
+  complaints      String?
+  diagnostics     String?
+  recommendations String?
+  additionalNotes String?
+
+  labourTotal Int @default(0) // paise
+  partsTotal  Int @default(0) // paise
+  discount    Int @default(0) // paise
+  tax         Int @default(0) // paise
+  grandTotal  Int @default(0) // paise
+
+  advancePaid   Int @default(0) // paise
+  pendingAmount Int @default(0) // paise
+
+  finalPaymentMode PaymentMode?
+  invoiceNumber    String?
+
+  // 1:1 link to Sale (defining side, needs unique saleId)
+  sales Sale[] @relation("JobCardSales")  // ✅ Now allows multiple sales
+
+  lineItems   JobLineItem[]
+  payments    JobPayment[]
+  inspections JobInspection[]
+  attachments Attachment[]    @relation("JobCardAttachments")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vehicleId])
+  @@index([jobNumber])
+}
+
+model JobLineItem {
+  id Int @id @default(autoincrement())
+
+  job       JobCard @relation(fields: [jobCardId], references: [id])
+  jobCardId Int
+
+  lineType    JobLineType
+  description String
+  quantity    Int         @default(1)
+  unitPrice   Int // paise
+  total       Int // paise
+
+  inventoryItem   InventoryItem? @relation(fields: [inventoryItemId], references: [id])
+  inventoryItemId Int?
+
+  createdAt DateTime @default(now())
+}
+
+model JobPayment {
+  id Int @id @default(autoincrement())
+
+  job       JobCard @relation(fields: [jobCardId], references: [id])
+  jobCardId Int
+
+  paymentType JobPaymentType
+  amount      Int // paise
+  date        DateTime       @default(now())
+  paymentMode PaymentMode
+  receivedBy  String?        // ✅ ADD THIS LINE
+  reference   String?
+  note        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([jobCardId, date])
+}
+
+/**
+ * ========== Inspection Templates & Job Inspections ==========
+ */
+
+model InspectionTemplate {
+  id          Int                    @id @default(autoincrement())
+  name        String
+  kind        InspectionTemplateKind
+  description String?
+  isActive    Boolean                @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items       InspectionTemplateItem[]
+  inspections JobInspection[]
+}
+
+model InspectionTemplateItem {
+  id         Int                @id @default(autoincrement())
+  template   InspectionTemplate @relation(fields: [templateId], references: [id])
+  templateId Int
+
+  label      String
+  section    String?
+  sortOrder  Int     @default(0)
+  isCritical Boolean @default(false)
+
+  inspectionItems JobInspectionItem[]
+}
+
+model JobInspection {
+  id Int @id @default(autoincrement())
+
+  jobCard   JobCard @relation(fields: [jobCardId], references: [id])
+  jobCardId Int
+
+  template   InspectionTemplate? @relation(fields: [templateId], references: [id])
+  templateId Int?
+
+  name  String?
+  type  InspectionType? // ARRIVAL / DELIVERY / OTHER
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items       JobInspectionItem[]
+  attachments Attachment[]        @relation("JobInspectionAttachments")
+}
+
+model JobInspectionItem {
+  id Int @id @default(autoincrement())
+
+  inspection      JobInspection @relation(fields: [jobInspectionId], references: [id])
+  jobInspectionId Int
+
+  templateItem   InspectionTemplateItem? @relation(fields: [templateItemId], references: [id])
+  templateItemId Int?
+
+  label  String
+  status InspectionItemStatus @default(OK)
+  note   String?
+
+  createdAt DateTime @default(now())
+}
+
+/**
+ * ========== Job Card Templates ==========
+ */
+
+model JobCardTemplate {
+  id          Int              @id @default(autoincrement())
+  name        String
+  category    TemplateCategory
+  description String?
+  isActive    Boolean          @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lineItems JobCardTemplateItem[]
+}
+
+model JobCardTemplateItem {
+  id         Int              @id @default(autoincrement())
+  template   JobCardTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateId Int
+
+  lineType    TemplateLineType
+  description String
+  quantity    Int              @default(1)
+  unitPrice   Int // paise
+  sortOrder   Int              @default(0)
+
+  inventoryItem   InventoryItem? @relation(fields: [inventoryItemId], references: [id])
+  inventoryItemId Int?
+
+  @@index([templateId])
+}
+
+/**
+ * ✅ NEW: ========== Vendors & Vendor Payments ==========
+ */
+
+model Vendor {
+  id          Int     @id @default(autoincrement())
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  gstNumber   String?
+  totalDue    Int     @default(0) // paise
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments VendorPayment[]
+
+  @@index([name])
+}
+
+model VendorPayment {
+  id         Int      @id @default(autoincrement())
+  vendor     Vendor   @relation(fields: [vendorId], references: [id])
+  vendorId   Int
+  date       DateTime
+  amount     Int // paise - total invoice amount
+  amountPaid Int      @default(0) // paise - amount paid so far
+
+  paymentMode   PaymentMode?
+  invoiceNumber String?
+  description   String?
+  dueDate       DateTime?
+  status        VendorPaymentStatus @default(PENDING)
+
+  // Link to auto-created expense when payment is made
+  relatedExpense   Expense? @relation(fields: [relatedExpenseId], references: [id])
+  relatedExpenseId Int?     @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vendorId, date])
+  @@index([status])
+}
+
+/**
+ * ========== Attachments (Photos & Documents) ==========
+ */
+
+model Attachment {
+  id Int @id @default(autoincrement())
+
+  type         AttachmentType
+  category     AttachmentCategory?
+  url          String
+  originalName String?
+  mimeType     String?
+  size         Int?
+
+  vehicle   Vehicle? @relation("VehicleAttachments", fields: [vehicleId], references: [id])
+  vehicleId Int?
+
+  jobCard   JobCard? @relation("JobCardAttachments", fields: [jobCardId], references: [id])
+  jobCardId Int?
+
+  jobInspection   JobInspection? @relation("JobInspectionAttachments", fields: [jobInspectionId], references: [id])
+  jobInspectionId Int?
+
+  createdAt DateTime @default(now())
+}
+
+/**
+ * ========== Reminders ==========
+ */
+
+model Reminder {
+  id Int @id @default(autoincrement())
+
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id])
+  vehicleId Int?
+
+  customerName  String?
+  customerPhone String?
+  customerEmail String?
+
+  type    ReminderType
+  channel ReminderChannel @default(SMS)
+  status  ReminderStatus  @default(PENDING)
+
+  dueDate     DateTime?
+  odometerDue Int?
+
+  message    String?
+  lastSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vehicleId, dueDate])
+  @@index([status, dueDate])
+}
+
+/**
+ * ========== Audit Log ==========
+ */
+
+model AuditLog {
+  id Int @id @default(autoincrement())
+
+  user   User? @relation("UserAuditLogs", fields: [userId], references: [id])
+  userId Int?
+
+  entityType EntityType
+  entityId   Int
+  action     AuditAction
+
+  timestamp DateTime @default(now())
+  summary   String?
+  details   Json?
+}

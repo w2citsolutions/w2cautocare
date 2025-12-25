@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    // Build output
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    // Module system: CommonJS for Node
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "ES2020",
+
+    // Interop & runtime
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+
+    // Outputs
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Type checking
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+
+    // Relax these two – they were causing many of your Prisma errors
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+
+    // Turn OFF the thing that caused all the TS1295 noise
+    "verbatimModuleSyntax": false,
+
+    // These are not very helpful for a backend-only project; you can re-enable if you want later:
+    // "jsx": "react-jsx",
+    // "isolatedModules": true,
+    // "noUncheckedSideEffectImports": true,
+    // "moduleDetection": "force"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
