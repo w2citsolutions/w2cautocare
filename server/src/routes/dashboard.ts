@@ -1,483 +1,229 @@
-// server/src/routes/jobcards.ts
 import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
-import { PaymentMode, JobStatus, JobLineType, JobPaymentType } from "@prisma/client";
 
 const router = Router();
 
-/** -----------------------------
- * Types (API)
- * ----------------------------- */
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
 
-interface CreateJobCardBody {
-  vehicleId?: number;
-
-  // aliases from UI
-  regNumber?: string;
-  vehicleNumber?: string;
-  carNumber?: string;
-  vehicleModel?: string;  // ✅ Added vehicle model
-
-  // customer aliases
-  customerName?: string;
-  ownerName?: string;
-
-  customerPhone?: string;
-  ownerPhone?: string;
-
-  // vehicle owner fallback
-  ownerNameForVehicle?: string;
-
-  inDate?: string;
-  promisedDate?: string;
-
-  odometer?: number;
-  fuelLevel?: string;
-
-  complaints?: string;
-  additionalNotes?: string;
-}
-
-interface UpdateJobCardBody {
-  inDate?: string | null;
-  promisedDate?: string | null;
-
-  status?: JobStatus;
-
-  // ✅ Customer fields
-  customerName?: string | null;
-  customerPhone?: string | null;
-
-  odometer?: number | null;
-  fuelLevel?: string | null;
-
-  complaints?: string | null;
-
-  // DB fields
-  diagnostics?: string | null;
-  recommendations?: string | null;
-  additionalNotes?: string | null;
-
-  // ✅ UI aliases (Jobs page commonly sends these)
-  diagnosis?: string | null; // -> diagnostics
-  workRecommended?: string | null; // -> recommendations
-  notes?: string | null; // -> additionalNotes
-
-  discount?: number;
-  tax?: number;
-
-  invoiceNumber?: string | null;
-  finalPaymentMode?: PaymentMode | string | null;
-}
-
-interface AddLineItemBody {
-  lineType: JobLineType | string;
-  description: string;
-  quantity?: number;
-  unitPrice: number;
-  inventoryItemId?: number;
-}
-
-interface UpdateLineItemBody {
-  lineType?: JobLineType | string;
-  description?: string;
-  quantity?: number;
-  unitPrice?: number;
-  inventoryItemId?: number | null;
-}
-
-interface AddPaymentBody {
-  date?: string;
-  amount: number;
-  paymentMode: PaymentMode | string;
-  paymentType?: JobPaymentType | string;
-  receivedBy?: string; // ✅ Who received the payment
-  reference?: string;
-  note?: string;
-}
-
-interface UpdatePaymentBody {
-  date?: string;
-  amount?: number; // rupees
-  paymentMode?: PaymentMode | string;
-  paymentType?: JobPaymentType | string;
-  receivedBy?: string; // ✅ Who received the payment
-  reference?: string | null;
-  note?: string | null;
-}
-
-interface CloseJobBody {
-  outDate?: string;
-  note?: string;
-  finalPaymentMode?: PaymentMode | string | null;
-  invoiceNumber?: string | null;
-}
-
-/** -----------------------------
- * Helpers
- * ----------------------------- */
-
-function normalizeRegNumber(input: string) {
-  return input.trim().toUpperCase();
-}
-
-function toPaise(rupees: number) {
-  return Math.round(Number(rupees || 0) * 100);
-}
-
-function fromPaise(paise: number | null | undefined) {
-  return (paise || 0) / 100;
-}
-
-function parsePaymentMode(input: any): PaymentMode | null {
-  if (!input) return null;
-  const upper = String(input).toUpperCase();
-  return upper in PaymentMode ? (upper as PaymentMode) : null;
-}
-
-function parseJobLineType(input: any): JobLineType | null {
-  if (!input) return null;
-  const upper = String(input).toUpperCase();
-  return upper in JobLineType ? (upper as JobLineType) : null;
-}
-
-function parseJobPaymentType(input: any): JobPaymentType {
-  if (!input) return JobPaymentType.ADVANCE;
-  const upper = String(input).toUpperCase();
-  return upper in JobPaymentType ? (upper as JobPaymentType) : JobPaymentType.ADVANCE;
-}
-
-async function generateJobNumber() {
+function parseDateRange(from?: any, to?: any) {
   const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const year = now.getFullYear();
+  const month = now.getMonth();
 
-  const prefix = `JC-${yyyy}-${mm}-`;
+  let start = new Date(year, month, 1, 0, 0, 0, 0);
+  let end = new Date(year, month + 1, 0, 23, 59, 59, 999);
 
-  const lastJob = await prisma.jobCard.findFirst({
-    where: { jobNumber: { startsWith: prefix } },
-    orderBy: { id: "desc" },
-  });
-
-  let seq = 1;
-  if (lastJob?.jobNumber) {
-    const parts = lastJob.jobNumber.split("-");
-    const lastSeq = Number(parts[3] || "0");
-    if (!isNaN(lastSeq)) seq = lastSeq + 1;
+  if (from) {
+    const raw = Array.isArray(from) ? from[0] : from;
+    const f = new Date(String(raw));
+    if (!isNaN(f.getTime())) {
+      start = f;
+      start.setHours(0, 0, 0, 0);
+    }
   }
 
-  return `${prefix}${String(seq).padStart(4, "0")}`;
+  if (to) {
+    const raw = Array.isArray(to) ? to[0] : to;
+    const t = new Date(String(raw));
+    if (!isNaN(t.getTime())) {
+      end = t;
+      end.setHours(23, 59, 59, 999);
+    }
+  }
+
+  return { start, end };
 }
 
-function mapJobCard(j: any) {
-  return {
-    id: j.id,
-    jobNumber: j.jobNumber,
-    status: j.status,
-    inDate: j.inDate,
-    promisedDate: j.promisedDate,
+function paiseToRupees(amount: number | null | undefined) {
+  if (!amount) return 0;
+  return Math.round(amount) / 100;
+}
 
-    customerName: j.customerName,
-    customerPhone: j.customerPhone,
+function parsePaidBy(note: string | null): string | null {
+  if (!note) return null;
+  const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
+  return match ? (match[1] || null) : null;
+}
 
-    odometer: j.odometer,
-    fuelLevel: j.fuelLevel,
-
-    complaints: j.complaints,
-    diagnostics: j.diagnostics,
-    recommendations: j.recommendations,
-    additionalNotes: j.additionalNotes,
-
-    labourTotal: fromPaise(j.labourTotal),
-    partsTotal: fromPaise(j.partsTotal),
-    discount: fromPaise(j.discount),
-    tax: fromPaise(j.tax),
-    grandTotal: fromPaise(j.grandTotal),
-
-    advancePaid: fromPaise(j.advancePaid),
-    pendingAmount: fromPaise(j.pendingAmount),
-
-    finalPaymentMode: j.finalPaymentMode,
-    invoiceNumber: j.invoiceNumber,
-    saleId: j.saleId,
-
-    createdAt: j.createdAt,
-    updatedAt: j.updatedAt,
-
-    vehicle: j.vehicle
-      ? {
-          id: j.vehicle.id,
-          regNumber: j.vehicle.regNumber,
-          make: j.vehicle.make,
-          model: j.vehicle.model,
-          variant: j.vehicle.variant,
-          fuelType: j.vehicle.fuelType,
-          year: j.vehicle.year,
-          color: j.vehicle.color,
-          ownerName: j.vehicle.ownerName,
-          ownerPhone: j.vehicle.ownerPhone,
-        }
-      : null,
-
-    lineItems: (j.lineItems || []).map((li: any) => ({
-      id: li.id,
-      lineType: li.lineType,
-      description: li.description,
-      quantity: li.quantity,
-      unitPrice: fromPaise(li.unitPrice),
-      total: fromPaise(li.total),
-      inventoryItemId: li.inventoryItemId,
-      createdAt: li.createdAt,
-    })),
-
-    payments: (j.payments || []).map((p: any) => ({
-      id: p.id,
-      paymentType: p.paymentType,
-      amount: fromPaise(p.amount),
-      date: p.date,
-      paymentMode: p.paymentMode,
-      receivedBy: p.receivedBy, // ✅ Include receivedBy
-      reference: p.reference,
-      note: p.note,
-      createdAt: p.createdAt,
-    })),
-  };
+function computeCurrentStockForItem(
+  transactions: { type: "IN" | "OUT"; quantity: number }[]
+) {
+  let stock = 0;
+  for (const t of transactions) {
+    if (t.type === "IN") stock += t.quantity;
+    else stock -= t.quantity;
+  }
+  return stock;
 }
 
 /**
- * Recalculate totals using schema fields:
- * JobLineItem.total, JobLineItem.lineType
+ * GET /dashboard - Comprehensive 360° Business Dashboard
+ * ✅ UPDATED: Includes JobPayments in sales analytics
  */
-async function recalcJobFinancials(jobCardId: number) {
-  const lineItems = await prisma.jobLineItem.findMany({ where: { jobCardId } });
-
-  let labour = 0;
-  let parts = 0;
-
-  for (const li of lineItems) {
-    if (li.lineType === JobLineType.LABOUR) labour += li.total;
-    else if (li.lineType === JobLineType.PART) parts += li.total;
-    else parts += li.total;
-  }
-
-  const payments = await prisma.jobPayment.findMany({ where: { jobCardId } });
-  const paid = payments.reduce((s, p) => s + p.amount, 0);
-
-  const job = await prisma.jobCard.findUnique({ where: { id: jobCardId } });
-  if (!job) throw new Error("JobCard not found");
-
-  const discount = job.discount ?? 0;
-  const tax = job.tax ?? 0;
-
-  const grand = labour + parts - discount + tax;
-  const pending = Math.max(0, grand - paid);
-
-  return prisma.jobCard.update({
-    where: { id: jobCardId },
-    data: {
-      labourTotal: labour,
-      partsTotal: parts,
-      grandTotal: grand,
-      advancePaid: paid,
-      pendingAmount: pending,
-    },
-    include: {
-      vehicle: true,
-      lineItems: { orderBy: { id: "asc" } },
-      payments: { orderBy: { date: "asc" } },
-    },
-  });
-}
-
-
-/**
- * ✅ FIXED: Create SEPARATE sales for each payment receiver
- * This ensures proper tracking when Nitesh, Tanmeet, and Bank each receive different amounts
- * FIXED: Prevents duplicates by normalizing null/empty receivedBy values
- */
-async function syncJobCardSale(jobId: number) {
-  // Get job with all payments and existing sales
-  const job = await prisma.jobCard.findUnique({
-    where: { id: jobId },
-    include: {
-      payments: true,
-      sales: true, // ✅ Changed from 'sale' to 'sales' (1:many relationship)
-    },
-  });
-
-  if (!job) return;
-
-  // Get valid payments (exclude REFUND)
-  const validPayments = job.payments.filter(
-    (p) => p.paymentType === "ADVANCE" || p.paymentType === "FINAL"
-  );
-
-  // ✅ FIX: Delete SaleVersions BEFORE deleting Sales (foreign key constraint)
-  if (job.sales && job.sales.length > 0) {
-    // First, delete all sale versions for these sales
-    for (const sale of job.sales) {
-      await prisma.saleVersion.deleteMany({
-        where: { saleId: sale.id },
-      });
-    }
-    
-    // Then delete the sales
-    await prisma.sale.deleteMany({
-      where: { jobCardId: jobId },
-    });
-  }
-
-  // If no valid payments, we're done
-  if (validPayments.length === 0) return;
-
-  // ✅ FIX: Normalize receivedBy to avoid duplicates
-  const normalizeReceiver = (receivedBy: string | null | undefined): string => {
-    if (!receivedBy || receivedBy.trim() === '') {
-      return 'Untracked';
-    }
-    return receivedBy.trim();
-  };
-
-  // Group payments by receivedBy
-  const paymentsByReceiver = validPayments.reduce((acc, payment) => {
-    const receiver = normalizeReceiver(payment.receivedBy);
-    if (!acc[receiver]) {
-      acc[receiver] = [];
-    }
-    acc[receiver].push(payment);
-    return acc;
-  }, {} as Record<string, typeof validPayments>);
-
-  console.log(`📊 Creating sales for job ${job.jobNumber}:`, Object.keys(paymentsByReceiver));
-
-  // Create separate sale for each receiver
-  for (const [receivedBy, payments] of Object.entries(paymentsByReceiver)) {
-    // Calculate total amount for this receiver
-    const totalAmount = payments.reduce((sum, p) => sum + p.amount, 0);
-
-    // Get most recent payment for this receiver (for date and payment mode)
-    const recentPayment = payments.sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-    )[0];
-
-    // ✅ Safety check for TypeScript
-    if (!recentPayment) continue;
-
-    // Create the sale
-    const sale = await prisma.sale.create({
-      data: { jobCardId: jobId },
-    });
-
-    // Create the sale version
-    const version = await prisma.saleVersion.create({
-      data: {
-        saleId: sale.id,
-        versionNumber: 1,
-        date: recentPayment.date,
-        amount: totalAmount,
-        category: "Service",
-        paymentMode: recentPayment.paymentMode,
-        reference: job.jobNumber,
-        receivedBy: receivedBy,
-      },
-    });
-
-    // Link as current version
-    await prisma.sale.update({
-      where: { id: sale.id },
-      data: { currentVersionId: version.id },
-    });
-
-    console.log(
-      `✅ Created sale for ${receivedBy}: ₹${(totalAmount / 100).toFixed(2)} (${payments.length} payment${payments.length > 1 ? 's' : ''}, Job ${job.jobNumber})`
-    );
-  }
-}
-
-
-/** -----------------------------
- * Routes
- * ----------------------------- */
-
-// ✅ UPDATED: POST /jobcards - now handles vehicleModel
-router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    const body = req.body as CreateJobCardBody;
+    const { from, to } = req.query;
+    const { start, end } = parseDateRange(from, to);
 
-    const reg = body.regNumber || body.vehicleNumber || body.carNumber || "";
-    const customerName = (body.customerName || body.ownerName || "").trim();
-    const customerPhone = (body.customerPhone || body.ownerPhone || "").trim();
-    const vehicleModel = body.vehicleModel?.trim() || null;  // ✅ Extract model
-
-    let vehicleId: number;
-
-    if (body.vehicleId) {
-      const v = await prisma.vehicle.findUnique({ where: { id: body.vehicleId } });
-      if (!v) return res.status(404).json({ message: "Vehicle not found" });
-      vehicleId = v.id;
-    } else {
-      if (!reg.trim() || !customerName) {
-        return res.status(400).json({ message: "regNumber and customerName are required." });
-      }
-
-      const regNumber = normalizeRegNumber(reg);
-      let v = await prisma.vehicle.findUnique({ where: { regNumber } });
-
-      if (!v) {
-        // ✅ Create new vehicle with model
-        v = await prisma.vehicle.create({
-          data: {
-            regNumber,
-            model: vehicleModel,  // ✅ Store model
-            ownerName: customerName,
-            ownerPhone: customerPhone || null,
+    // ============================================
+    // 1. SALES ANALYTICS (Job Payments + Standalone Sales)
+    // ✅ FIXED: Now includes job payments
+    // ============================================
+    
+    // Query job payments
+    const jobPayments = await prisma.jobPayment.findMany({
+      where: {
+        date: {
+          gte: start,
+          lte: end,
+        },
+      },
+      include: {
+        job: {
+          include: {
+            vehicle: true,
           },
-        });
-      } else {
-        // ✅ Update existing vehicle with new info including model
-        const updates: any = {};
-        if (customerName && customerName !== v.ownerName) updates.ownerName = customerName;
-        if (customerPhone && customerPhone !== (v.ownerPhone || "")) updates.ownerPhone = customerPhone;
-        if (vehicleModel && vehicleModel !== v.model) updates.model = vehicleModel;  // ✅ Update model if provided
-        
-        if (Object.keys(updates).length) {
-          v = await prisma.vehicle.update({ where: { id: v.id }, data: updates });
-        }
-      }
+        },
+      },
+    });
 
-      vehicleId = v.id;
+    // Query standalone sales
+    const sales = await prisma.sale.findMany({
+      where: {
+        currentVersion: {
+          date: {
+            gte: start,
+            lte: end,
+          },
+        },
+      },
+      include: {
+        currentVersion: true,
+      },
+    });
+
+    let totalSalesPaise = 0;
+    const salesByDate = new Map<string, number>();
+    const salesByMode = new Map<string, number>();
+    const salesByReceiver = new Map<string, number>();
+    const salesByCategory = new Map<string, number>();
+
+    // ✅ Process job payments first
+    for (const payment of jobPayments) {
+      totalSalesPaise += payment.amount;
+
+      const date = payment.date.toISOString().slice(0, 10);
+      salesByDate.set(date, (salesByDate.get(date) || 0) + payment.amount);
+
+      salesByMode.set(payment.paymentMode, (salesByMode.get(payment.paymentMode) || 0) + payment.amount);
+
+      const receiver = payment.receivedBy || "Untracked";
+      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + payment.amount);
+
+      const category = "Job Payment";
+      salesByCategory.set(category, (salesByCategory.get(category) || 0) + payment.amount);
     }
 
-    const jobNumber = await generateJobNumber();
+    // ✅ Process standalone sales
+    for (const s of sales) {
+      const v = s.currentVersion;
+      if (!v) continue;
 
-    const job = await prisma.jobCard.create({
-      data: {
-        jobNumber,
-        vehicleId,
+      totalSalesPaise += v.amount;
 
-        customerName: customerName || "Customer",
-        customerPhone: customerPhone || null,
+      const date = v.date.toISOString().slice(0, 10);
+      salesByDate.set(date, (salesByDate.get(date) || 0) + v.amount);
 
-        inDate: body.inDate ? new Date(body.inDate) : new Date(),
-        promisedDate: body.promisedDate ? new Date(body.promisedDate) : null,
+      salesByMode.set(v.paymentMode, (salesByMode.get(v.paymentMode) || 0) + v.amount);
 
-        status: JobStatus.OPEN,
+      const receiver = v.receivedBy || "Untracked";
+      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + v.amount);
 
-        odometer: typeof body.odometer === "number" ? body.odometer : null,
-        fuelLevel: body.fuelLevel || null,
+      const category = v.category || "General";
+      salesByCategory.set(category, (salesByCategory.get(category) || 0) + v.amount);
+    }
 
-        complaints: body.complaints || null,
-        additionalNotes: body.additionalNotes || null,
-
-        labourTotal: 0,
-        partsTotal: 0,
-        discount: 0,
-        tax: 0,
-        grandTotal: 0,
-        advancePaid: 0,
-        pendingAmount: 0,
+    // ============================================
+    // 2. EXPENSES ANALYTICS
+    // ============================================
+    const expenses = await prisma.expense.findMany({
+      where: {
+        currentVersion: {
+          date: { gte: start, lte: end },
+        },
       },
+      include: { currentVersion: true },
+    });
+
+    let totalExpensesPaise = 0;
+    let totalEmployeeAdvancesPaise = 0;
+    const expensesByDate = new Map<string, number>();
+    const expensesByCategory = new Map<string, number>();
+    const expensesByPaidBy = new Map<string, number>();
+    const expensesByVendor = new Map<string, number>();
+    const employeeAdvances = new Map<string, number>();
+
+    for (const e of expenses) {
+      const v = e.currentVersion;
+      if (!v) continue;
+
+      const isEmployeeAdvance = v.category === "Employee Advance";
+
+      if (isEmployeeAdvance) {
+        // ✅ Track employee advances separately
+        totalEmployeeAdvancesPaise += v.amount;
+        const employeeName = v.vendor || "Unknown Employee";
+        employeeAdvances.set(employeeName, (employeeAdvances.get(employeeName) || 0) + v.amount);
+      } else {
+        // ✅ Track regular expenses only
+        totalExpensesPaise += v.amount;
+
+        const date = v.date.toISOString().slice(0, 10);
+        expensesByDate.set(date, (expensesByDate.get(date) || 0) + v.amount);
+
+        const category = v.category || "General";
+        expensesByCategory.set(category, (expensesByCategory.get(category) || 0) + v.amount);
+
+        const paidBy = parsePaidBy(v.note) || "Untracked";
+        expensesByPaidBy.set(paidBy, (expensesByPaidBy.get(paidBy) || 0) + v.amount);
+
+        const vendor = v.vendor || "Direct";
+        expensesByVendor.set(vendor, (expensesByVendor.get(vendor) || 0) + v.amount);
+      }
+    }
+
+    // ============================================
+    // 3. CASH FLOW TRACKING
+    // ============================================
+    const cashFlow: any = {
+      Nitesh: { received: 0, paid: 0, net: 0 },
+      Tanmeet: { received: 0, paid: 0, net: 0 },
+      "Bank Account": { received: 0, paid: 0, net: 0 },
+    };
+
+    salesByReceiver.forEach((amount, person) => {
+      if (cashFlow[person]) cashFlow[person].received += amount;
+    });
+
+    expensesByPaidBy.forEach((amount, person) => {
+      if (cashFlow[person]) cashFlow[person].paid += amount;
+    });
+
+    Object.keys(cashFlow).forEach((person) => {
+      cashFlow[person].net = cashFlow[person].received - cashFlow[person].paid;
+      cashFlow[person].received = paiseToRupees(cashFlow[person].received);
+      cashFlow[person].paid = paiseToRupees(cashFlow[person].paid);
+      cashFlow[person].net = paiseToRupees(cashFlow[person].net);
+    });
+
+    // ============================================
+    // 4. JOB CARDS ANALYTICS
+    // ============================================
+    const jobCards = await prisma.jobCard.findMany({
+      where: { inDate: { gte: start, lte: end } },
       include: {
         vehicle: true,
         lineItems: true,
@@ -485,474 +231,413 @@ router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       },
     });
 
-    return res.status(201).json(mapJobCard(job));
-  } catch (err) {
-    console.error("Create jobcard error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
+    const jobStats = {
+      total: jobCards.length,
+      open: 0,
+      inProgress: 0,
+      ready: 0,
+      delivered: 0,
+      cancelled: 0,
+      totalRevenue: 0,
+      totalAdvances: 0,
+      totalPending: 0,
+      avgJobValue: 0,
+      labourTotal: 0,
+      partsTotal: 0,
+    };
 
-/**
- * GET /jobcards
- */
-router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const { status, reg, from, to } = req.query as any;
+    const jobsByStatus = new Map<string, number>();
+    const jobsByMake = new Map<string, number>();
+    const topCustomers = new Map<string, { count: number; revenue: number }>();
 
-    const where: any = {};
+    for (const job of jobCards) {
+      jobStats[job.status.toLowerCase() as keyof typeof jobStats]++;
+      jobStats.totalRevenue += job.grandTotal;
+      jobStats.totalAdvances += job.advancePaid;
+      jobStats.totalPending += job.pendingAmount;
+      jobStats.labourTotal += job.labourTotal;
+      jobStats.partsTotal += job.partsTotal;
 
-    if (status) where.status = String(status).toUpperCase();
+      jobsByStatus.set(job.status, (jobsByStatus.get(job.status) || 0) + 1);
 
-    if (from || to) {
-      where.inDate = {};
-      if (from) where.inDate.gte = new Date(String(from));
-      if (to) {
-        const end = new Date(String(to));
-        end.setHours(23, 59, 59, 999);
-        where.inDate.lte = end;
+      if (job.vehicle?.make) {
+        jobsByMake.set(job.vehicle.make, (jobsByMake.get(job.vehicle.make) || 0) + 1);
       }
-    }
 
-    if (reg) {
-      const norm = String(reg).trim().toUpperCase();
-      where.vehicle = { regNumber: { contains: norm, mode: "insensitive" } };
-    }
-
-    const jobs = await prisma.jobCard.findMany({
-      where,
-      orderBy: { inDate: "desc" },
-      include: { vehicle: true },
-      take: 200,
-    });
-
-    return res.json(jobs.map((j) => mapJobCard({ ...j, lineItems: [], payments: [] })));
-  } catch (err) {
-    console.error("List jobcards error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * GET /jobcards/:id
- */
-router.get("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
-
-    const job = await prisma.jobCard.findUnique({
-      where: { id },
-      include: {
-        vehicle: true,
-        lineItems: { orderBy: { id: "asc" } },
-        payments: { orderBy: { date: "asc" } },
-      },
-    });
-
-    if (!job) return res.status(404).json({ message: "Job not found" });
-    return res.json(mapJobCard(job));
-  } catch (err) {
-    console.error("Get jobcard error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * PUT /jobcards/:id
- * ✅ Accepts UI aliases: diagnosis/notes/workRecommended
- */
-router.put("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
-
-    const body = req.body as UpdateJobCardBody;
-    const data: any = {};
-
-    if (body.inDate !== undefined) data.inDate = body.inDate ? new Date(body.inDate) : null;
-    if (body.promisedDate !== undefined) data.promisedDate = body.promisedDate ? new Date(body.promisedDate) : null;
-
-    // status (no backend restriction here)
-    if (body.status !== undefined) data.status = body.status;
-
-    // ✅ Customer fields
-    if (body.customerName !== undefined) data.customerName = body.customerName || "";
-    if (body.customerPhone !== undefined) data.customerPhone = body.customerPhone || null;
-
-    if (body.odometer !== undefined) data.odometer = typeof body.odometer === "number" ? body.odometer : null;
-    if (body.fuelLevel !== undefined) data.fuelLevel = body.fuelLevel || null;
-
-    if (body.complaints !== undefined) data.complaints = body.complaints || null;
-
-    // ✅ accept both DB fields & UI aliases
-    const diagnostics = body.diagnostics ?? body.diagnosis;
-    const recommendations = body.recommendations ?? body.workRecommended;
-    const additionalNotes = body.additionalNotes ?? body.notes;
-
-    if (diagnostics !== undefined) data.diagnostics = diagnostics || null;
-    if (recommendations !== undefined) data.recommendations = recommendations || null;
-    if (additionalNotes !== undefined) data.additionalNotes = additionalNotes || null;
-
-    if (body.discount !== undefined) data.discount = toPaise(body.discount);
-    if (body.tax !== undefined) data.tax = toPaise(body.tax);
-
-    if (body.invoiceNumber !== undefined) data.invoiceNumber = body.invoiceNumber || null;
-
-    if (body.finalPaymentMode !== undefined) {
-      data.finalPaymentMode =
-        body.finalPaymentMode == null
-          ? null
-          : typeof body.finalPaymentMode === "string"
-          ? parsePaymentMode(body.finalPaymentMode)
-          : body.finalPaymentMode;
-    }
-
-    await prisma.jobCard.update({ where: { id }, data });
-
-    const updated = await recalcJobFinancials(id);
-    return res.json(mapJobCard(updated));
-  } catch (err: any) {
-    console.error("Update jobcard error:", err);
-    if (err.code === "P2025") return res.status(404).json({ message: "Job not found" });
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * POST /jobcards/:id/line-items
- */
-router.post("/:id/line-items", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
-
-    const job = await prisma.jobCard.findUnique({ where: { id: jobId } });
-    if (!job) return res.status(404).json({ message: "Job not found" });
-
-    const body = req.body as AddLineItemBody;
-
-    const lineType = parseJobLineType((body as any).lineType ?? (body as any).type);
-    const description = body.description;
-    const quantity = Number(body.quantity ?? 1);
-    const unitPriceRupees = body.unitPrice;
-
-    if (!lineType || !description || !quantity || unitPriceRupees == null) {
-      return res.status(400).json({
-        message: "lineType, description, quantity, unitPrice are required",
-      });
-    }
-
-    const unitPrice = toPaise(unitPriceRupees);
-    const total = quantity * unitPrice;
-
-    await prisma.jobLineItem.create({
-      data: {
-        jobCardId: jobId,
-        lineType,
-        description,
-        quantity,
-        unitPrice,
-        total,
-        inventoryItemId: body.inventoryItemId || null,
-      },
-    });
-
-    const updated = await recalcJobFinancials(jobId);
-    return res.status(201).json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Add line item error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * PUT /jobcards/:id/line-items/:lineId
- */
-router.put("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    const lineId = Number(req.params.lineId);
-    if (isNaN(jobId) || isNaN(lineId)) return res.status(400).json({ message: "Invalid ids" });
-
-    const existing = await prisma.jobLineItem.findUnique({ where: { id: lineId } });
-    if (!existing || existing.jobCardId !== jobId) return res.status(404).json({ message: "Line item not found" });
-
-    const body = req.body as UpdateLineItemBody;
-    const data: any = {};
-
-    if (body.lineType !== undefined) {
-      const lt = parseJobLineType(body.lineType);
-      if (!lt) return res.status(400).json({ message: "Invalid lineType" });
-      data.lineType = lt;
-    }
-
-    if (body.description !== undefined) data.description = body.description;
-    if (body.quantity !== undefined) data.quantity = Number(body.quantity);
-    if (body.unitPrice !== undefined) data.unitPrice = toPaise(body.unitPrice);
-    if (body.inventoryItemId !== undefined) data.inventoryItemId = body.inventoryItemId || null;
-
-    const newQty = data.quantity ?? existing.quantity;
-    const newUnit = data.unitPrice ?? existing.unitPrice;
-    data.total = newQty * newUnit;
-
-    await prisma.jobLineItem.update({ where: { id: lineId }, data });
-
-    const updated = await recalcJobFinancials(jobId);
-    return res.json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Update line item error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * DELETE /jobcards/:id/line-items/:lineId
- */
-router.delete("/:id/line-items/:lineId", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    const lineId = Number(req.params.lineId);
-    if (isNaN(jobId) || isNaN(lineId)) return res.status(400).json({ message: "Invalid ids" });
-
-    const existing = await prisma.jobLineItem.findUnique({ where: { id: lineId } });
-    if (!existing || existing.jobCardId !== jobId) return res.status(404).json({ message: "Line item not found" });
-
-    await prisma.jobLineItem.delete({ where: { id: lineId } });
-
-    const updated = await recalcJobFinancials(jobId);
-    return res.json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Delete line item error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * POST /jobcards/:id/payments
- * ✅ Now stores receivedBy in payment record
- */
-router.post("/:id/payments", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
-
-    const job = await prisma.jobCard.findUnique({ where: { id: jobId } });
-    if (!job) return res.status(404).json({ message: "Job not found" });
-
-    const body = req.body as AddPaymentBody;
-
-    if (body.amount == null || !body.paymentMode) {
-      return res.status(400).json({ message: "amount (rupees) and paymentMode are required." });
-    }
-
-    const pm = typeof body.paymentMode === "string" ? parsePaymentMode(body.paymentMode) : body.paymentMode;
-    if (!pm) {
-      return res.status(400).json({
-        message: `Invalid paymentMode. Allowed: ${Object.keys(PaymentMode).join(", ")}`,
-      });
-    }
-
-    const paymentType = parseJobPaymentType(body.paymentType);
-    const amount = toPaise(body.amount);
-
-    await prisma.jobPayment.create({
-      data: {
-        jobCardId: jobId,
-        paymentType,
-        amount,
-        date: body.date ? new Date(body.date) : new Date(),
-        paymentMode: pm,
-        receivedBy: body.receivedBy || null, // ✅ Store receivedBy
-        reference: body.reference || null,
-        note: body.note || null,
-      },
-    });
-
-    // ✅ Sync with sales (now reads receivedBy from payment records)
-    await syncJobCardSale(jobId);
-
-    const updated = await recalcJobFinancials(jobId);
-    return res.status(201).json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Add payment error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * PUT /jobcards/:id/payments/:paymentId
- * ✅ Now updates receivedBy in payment record
- */
-router.put("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    const paymentId = Number(req.params.paymentId);
-    if (isNaN(jobId) || isNaN(paymentId)) return res.status(400).json({ message: "Invalid ids" });
-
-    const payment = await prisma.jobPayment.findUnique({ where: { id: paymentId } });
-    if (!payment || payment.jobCardId !== jobId) {
-      return res.status(404).json({ message: "Payment not found" });
-    }
-
-    const body = req.body as UpdatePaymentBody;
-    const data: any = {};
-
-    if (body.amount !== undefined) {
-      const amt = Number(body.amount);
-      if (isNaN(amt) || amt < 0) return res.status(400).json({ message: "Invalid amount" });
-      data.amount = toPaise(amt);
-    }
-
-    if (body.paymentMode !== undefined) {
-      const pm = typeof body.paymentMode === "string" ? parsePaymentMode(body.paymentMode) : body.paymentMode;
-      if (!pm) {
-        return res.status(400).json({
-          message: `Invalid paymentMode. Allowed: ${Object.keys(PaymentMode).join(", ")}`,
+      const customer = job.customerName;
+      if (customer) {
+        const existing = topCustomers.get(customer) || { count: 0, revenue: 0 };
+        topCustomers.set(customer, {
+          count: existing.count + 1,
+          revenue: existing.revenue + job.grandTotal,
         });
       }
-      data.paymentMode = pm;
     }
 
-    if (body.paymentType !== undefined) data.paymentType = parseJobPaymentType(body.paymentType);
-    if (body.receivedBy !== undefined) data.receivedBy = body.receivedBy || null; // ✅ Update receivedBy
-    if (body.note !== undefined) data.note = body.note || null;
-    if (body.reference !== undefined) data.reference = body.reference || null;
-    if (body.date !== undefined) data.date = body.date ? new Date(body.date) : payment.date;
+    jobStats.avgJobValue = jobStats.total > 0 ? jobStats.totalRevenue / jobStats.total : 0;
 
-    await prisma.jobPayment.update({ where: { id: paymentId }, data });
-
-    // ✅ Sync with sales (now reads receivedBy from payment records)
-    await syncJobCardSale(jobId);
-    
-    const updated = await recalcJobFinancials(jobId);
-    return res.json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Update payment error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * DELETE /jobcards/:id/payments/:paymentId
- */
-router.delete("/:id/payments/:paymentId", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    const paymentId = Number(req.params.paymentId);
-    if (isNaN(jobId) || isNaN(paymentId)) return res.status(400).json({ message: "Invalid ids" });
-
-    const payment = await prisma.jobPayment.findUnique({ where: { id: paymentId } });
-    if (!payment || payment.jobCardId !== jobId) {
-      return res.status(404).json({ message: "Payment not found" });
-    }
-
-    await prisma.jobPayment.delete({ where: { id: paymentId } });
-
-    // ✅ Sync with sales (recreates sales based on remaining payments)
-    await syncJobCardSale(jobId);
-    
-    const updated = await recalcJobFinancials(jobId);
-    return res.json(mapJobCard(updated));
-  } catch (err) {
-    console.error("Delete payment error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
-
-/**
- * POST /jobcards/:id/close
- */
-router.post("/:id/close", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const jobId = Number(req.params.id);
-    if (isNaN(jobId)) return res.status(400).json({ message: "Invalid job id" });
-
-    const body = req.body as CloseJobBody;
-
-    const job = await prisma.jobCard.findUnique({
-      where: { id: jobId },
-      include: { vehicle: true },
-    });
-    if (!job) return res.status(404).json({ message: "Job not found" });
-
-    const withTotals = await recalcJobFinancials(jobId);
-    const outDate = body.outDate ? new Date(body.outDate) : new Date();
-
-    const finalMode =
-      body.finalPaymentMode == null
-        ? null
-        : typeof body.finalPaymentMode === "string"
-        ? parsePaymentMode(body.finalPaymentMode)
-        : body.finalPaymentMode;
-
-    const delivered = await prisma.jobCard.update({
-      where: { id: jobId },
-      data: {
-        status: JobStatus.DELIVERED,
-        promisedDate: withTotals.promisedDate,
-        finalPaymentMode: finalMode,
-        invoiceNumber: body.invoiceNumber ?? withTotals.invoiceNumber,
-        additionalNotes: body.note ?? withTotals.additionalNotes,
-      },
-      include: { vehicle: true, lineItems: true, payments: true },
-    });
-
-    // ✅ Sync sale based on actual payments
-    await syncJobCardSale(jobId);
-
-    const finalJob = await prisma.jobCard.findUnique({
-      where: { id: jobId },
+    // ============================================
+    // 5. VENDOR ANALYTICS
+    // ============================================
+    const vendors = await prisma.vendor.findMany({
       include: {
-        vehicle: true,
-        lineItems: { orderBy: { id: "asc" } },
-        payments: { orderBy: { date: "asc" } },
+        payments: {
+          where: { date: { gte: start, lte: end } },
+        },
       },
     });
 
-    return res.json(mapJobCard(finalJob));
-  } catch (err) {
-    console.error("Close jobcard error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
+    let totalVendorDue = 0;
+    let totalVendorPayments = 0;
+    const vendorStats = {
+      totalActive: 0,
+      totalInactive: 0,
+      pendingPayments: 0,
+      partialPayments: 0,
+      paidPayments: 0,
+    };
 
-/**
- * DELETE /jobcards/:id
- * ✅ Now deletes ALL associated sales (1:many relationship)
- */
-router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
-  try {
-    const id = Number(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ message: "Invalid job id" });
+    const topVendorsDue: any[] = [];
 
-    const job = await prisma.jobCard.findUnique({ 
-      where: { id },
-      include: { sales: true } // ✅ Changed from 'sale' to 'sales'
-    });
-    if (!job) return res.status(404).json({ message: "Job not found" });
+    for (const vendor of vendors) {
+      if (vendor.isActive) vendorStats.totalActive++;
+      else vendorStats.totalInactive++;
 
-    // Delete related data
-    await prisma.jobPayment.deleteMany({ where: { jobCardId: id } });
-    await prisma.jobLineItem.deleteMany({ where: { jobCardId: id } });
-    await prisma.jobInspectionItem.deleteMany({
-      where: { inspection: { jobCardId: id } },
-    });
-    await prisma.jobInspection.deleteMany({ where: { jobCardId: id } });
+      totalVendorDue += vendor.totalDue;
 
-    // ✅ Delete ALL sales for this job card
-    if (job.sales && job.sales.length > 0) {
-      // Delete all sale versions for each sale
-      for (const sale of job.sales) {
-        await prisma.saleVersion.deleteMany({ where: { saleId: sale.id } });
+      for (const payment of vendor.payments) {
+        totalVendorPayments += payment.amountPaid;
+        if (payment.status === "PENDING") vendorStats.pendingPayments++;
+        else if (payment.status === "PARTIAL") vendorStats.partialPayments++;
+        else if (payment.status === "PAID") vendorStats.paidPayments++;
       }
-      // Then delete all sales
-      await prisma.sale.deleteMany({ where: { jobCardId: id } });
+
+      if (vendor.payments.length > 0 || vendor.totalDue > 0) {
+        topVendorsDue.push({
+          id: vendor.id,
+          name: vendor.name,
+          totalDue: paiseToRupees(vendor.totalDue),
+          paymentsCount: vendor.payments.length,
+        });
+      }
     }
 
-    await prisma.jobCard.delete({ where: { id } });
-    return res.json({ ok: true });
+    topVendorsDue.sort((a, b) => b.totalDue - a.totalDue);
+
+    // ============================================
+    // 6. EMPLOYEE & PAYROLL
+    // ============================================
+    const employees = await prisma.employee.findMany({
+      include: {
+        advances: {
+          where: { date: { gte: start, lte: end } },
+        },
+        attendances: {
+          where: { date: { gte: start, lte: end } },
+        },
+      },
+    });
+
+    let totalSalaryLiability = 0;
+    let totalAdvances = 0;
+    const employeeStats = {
+      active: 0,
+      inactive: 0,
+      totalAdvances: 0,
+    };
+
+    const advancesByEmployee: any[] = [];
+    const attendanceStats = {
+      present: 0,
+      absent: 0,
+      paidLeave: 0,
+      unpaidLeave: 0,
+    };
+
+    for (const emp of employees) {
+      if (emp.isActive) {
+        employeeStats.active++;
+        totalSalaryLiability += emp.baseSalary;
+      } else {
+        employeeStats.inactive++;
+      }
+
+      let empAdvances = 0;
+      for (const adv of emp.advances) {
+        empAdvances += adv.amount;
+        totalAdvances += adv.amount;
+      }
+
+      if (empAdvances > 0) {
+        advancesByEmployee.push({
+          employeeId: emp.id,
+          employeeName: emp.name,
+          totalAdvances: paiseToRupees(empAdvances),
+        });
+      }
+
+      for (const att of emp.attendances) {
+        if (att.status === "PRESENT") attendanceStats.present++;
+        else if (att.status === "ABSENT") attendanceStats.absent++;
+        else if (att.status === "PAID_LEAVE") attendanceStats.paidLeave++;
+        else if (att.status === "UNPAID_LEAVE") attendanceStats.unpaidLeave++;
+      }
+    }
+
+    advancesByEmployee.sort((a, b) => b.totalAdvances - a.totalAdvances);
+
+    // ============================================
+    // 7. INVENTORY ANALYTICS
+    // ============================================
+    const inventoryItems = await prisma.inventoryItem.findMany({
+      include: {
+        stockTransactions: {
+          select: { type: true, quantity: true },
+        },
+      },
+    });
+
+    const inventoryStats = {
+      totalItems: inventoryItems.length,
+      lowStockCount: 0,
+      outOfStockCount: 0,
+    };
+
+    const lowStockItems: any[] = [];
+    const inventoryByCategory = new Map<string, number>();
+
+    for (const item of inventoryItems) {
+      const currentStock = computeCurrentStockForItem(item.stockTransactions);
+
+      const category = item.category || "Uncategorized";
+      inventoryByCategory.set(category, (inventoryByCategory.get(category) || 0) + 1);
+
+      if (currentStock === 0) {
+        inventoryStats.outOfStockCount++;
+      } else if (currentStock <= item.minStock) {
+        inventoryStats.lowStockCount++;
+        lowStockItems.push({
+          id: item.id,
+          name: item.name,
+          category: item.category,
+          sku: item.sku,
+          unit: item.unit,
+          minStock: item.minStock,
+          currentStock,
+        });
+      }
+    }
+
+    lowStockItems.sort((a, b) => a.currentStock - b.currentStock);
+
+    // ============================================
+    // 8. RECENT ACTIVITY
+    // ============================================
+    const auditLogs = await prisma.auditLog.findMany({
+      orderBy: { timestamp: "desc" },
+      take: 20,
+      include: {
+        user: { select: { id: true, name: true } },
+      },
+    });
+
+    const recentActivity = auditLogs.map((log: any) => ({
+      action: log.action,
+      summary: log.summary || `${log.action} on ${log.entityType}`,
+      createdAt: log.timestamp,
+      user: log.user?.name || "System",
+    }));
+
+    // ============================================
+    // 9. TRENDS & CHARTS
+    // ============================================
+    const datesSet = new Set<string>();
+    salesByDate.forEach((_, date) => datesSet.add(date));
+    expensesByDate.forEach((_, date) => datesSet.add(date));
+
+    const allDates = Array.from(datesSet).sort();
+    const dailyTrends = allDates.map((date) => ({
+      date,
+      sales: paiseToRupees(salesByDate.get(date) || 0),
+      expenses: paiseToRupees(expensesByDate.get(date) || 0),
+      profit: paiseToRupees((salesByDate.get(date) || 0) - (expensesByDate.get(date) || 0)),
+    }));
+
+    // ============================================
+    // 10. COMPREHENSIVE RESPONSE
+    // ============================================
+    const netProfit = totalSalesPaise - totalExpensesPaise;
+
+    return res.json({
+      range: {
+        from: start.toISOString(),
+        to: end.toISOString(),
+      },
+
+      // Core KPIs
+      kpis: {
+        totalSales: paiseToRupees(totalSalesPaise),
+        totalExpenses: paiseToRupees(totalExpensesPaise),
+        netProfit: paiseToRupees(netProfit),
+        profitMargin: totalSalesPaise > 0 ? (netProfit / totalSalesPaise) * 100 : 0,
+        expenseRatio: totalSalesPaise > 0 ? (totalExpensesPaise / totalSalesPaise) * 100 : 0,
+        totalAdvances: paiseToRupees(totalAdvances),
+        salaryLiability: paiseToRupees(totalSalaryLiability),
+        vendorDue: paiseToRupees(totalVendorDue),
+      },
+
+      // Sales breakdown
+      sales: {
+        total: paiseToRupees(totalSalesPaise),
+        count: sales.length + jobPayments.length,
+        avgSale: (sales.length + jobPayments.length) > 0 ? paiseToRupees(totalSalesPaise) / (sales.length + jobPayments.length) : 0,
+        byPaymentMode: Array.from(salesByMode.entries())
+          .map(([mode, amount]) => ({
+            mode,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byReceiver: Array.from(salesByReceiver.entries())
+          .map(([receiver, amount]) => ({
+            receiver,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byCategory: Array.from(salesByCategory.entries())
+          .map(([category, amount]) => ({
+            category,
+            amount: paiseToRupees(amount),
+            percentage: totalSalesPaise > 0 ? (amount / totalSalesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+      },
+
+      // Expenses breakdown (excluding employee advances)
+      expenses: {
+        total: paiseToRupees(totalExpensesPaise),
+        count: expenses.length - employeeAdvances.size,
+        avgExpense: (expenses.length - employeeAdvances.size) > 0 
+          ? paiseToRupees(totalExpensesPaise) / (expenses.length - employeeAdvances.size) 
+          : 0,
+        byCategory: Array.from(expensesByCategory.entries())
+          .map(([category, amount]) => ({
+            category,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byPaidBy: Array.from(expensesByPaidBy.entries())
+          .map(([paidBy, amount]) => ({
+            paidBy,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+        byVendor: Array.from(expensesByVendor.entries())
+          .map(([vendor, amount]) => ({
+            vendor,
+            amount: paiseToRupees(amount),
+            percentage: totalExpensesPaise > 0 ? (amount / totalExpensesPaise) * 100 : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount)
+          .slice(0, 10),
+      },
+
+      // Employee advances (separate from expenses)
+      employeeAdvances: {
+        total: paiseToRupees(totalEmployeeAdvancesPaise),
+        count: employeeAdvances.size,
+        byEmployee: Array.from(employeeAdvances.entries())
+          .map(([name, amount]) => ({
+            name,
+            amount: paiseToRupees(amount),
+            percentage: totalEmployeeAdvancesPaise > 0 
+              ? (amount / totalEmployeeAdvancesPaise) * 100 
+              : 0,
+          }))
+          .sort((a, b) => b.amount - a.amount),
+      },
+
+      // Cash flow by person
+      cashFlow,
+
+      // Job cards
+      jobCards: {
+        total: jobStats.total,
+        byStatus: {
+          open: jobStats.open,
+          inProgress: jobStats.inProgress,
+          ready: jobStats.ready,
+          delivered: jobStats.delivered,
+          cancelled: jobStats.cancelled,
+        },
+        revenue: {
+          total: paiseToRupees(jobStats.totalRevenue),
+          advances: paiseToRupees(jobStats.totalAdvances),
+          pending: paiseToRupees(jobStats.totalPending),
+          avgJobValue: paiseToRupees(jobStats.avgJobValue),
+        },
+        composition: {
+          labour: paiseToRupees(jobStats.labourTotal),
+          parts: paiseToRupees(jobStats.partsTotal),
+          labourPercentage:
+            jobStats.totalRevenue > 0 ? (jobStats.labourTotal / jobStats.totalRevenue) * 100 : 0,
+          partsPercentage:
+            jobStats.totalRevenue > 0 ? (jobStats.partsTotal / jobStats.totalRevenue) * 100 : 0,
+        },
+        byMake: Array.from(jobsByMake.entries())
+          .map(([make, count]) => ({ make, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 5),
+        topCustomers: Array.from(topCustomers.entries())
+          .map(([name, data]) => ({
+            name,
+            jobCount: data.count,
+            totalRevenue: paiseToRupees(data.revenue),
+          }))
+          .sort((a, b) => b.totalRevenue - a.totalRevenue)
+          .slice(0, 10),
+      },
+
+      // Vendors
+      vendors: {
+        stats: vendorStats,
+        totalDue: paiseToRupees(totalVendorDue),
+        totalPayments: paiseToRupees(totalVendorPayments),
+        topDue: topVendorsDue.slice(0, 10),
+      },
+
+      // Employees
+      employees: {
+        stats: employeeStats,
+        salaryLiability: paiseToRupees(totalSalaryLiability),
+        totalAdvances: paiseToRupees(totalAdvances),
+        advancesByEmployee: advancesByEmployee.slice(0, 10),
+        attendance: attendanceStats,
+      },
+
+      // Inventory
+      inventory: {
+        stats: inventoryStats,
+        lowStockItems: lowStockItems.slice(0, 10),
+        byCategory: Array.from(inventoryByCategory.entries()).map(([category, count]) => ({
+          category,
+          count,
+        })),
+      },
+
+      // Trends
+      trends: {
+        daily: dailyTrends,
+      },
+
+      // Recent activity
+      activity: recentActivity,
+    });
   } catch (err) {
-    console.error("Delete jobcard error:", err);
+    console.error("Dashboard error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 });
