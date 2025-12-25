@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 
@@ -42,7 +42,6 @@ function paiseToRupees(amount: number | null | undefined) {
   return Math.round(amount) / 100;
 }
 
-// Add this helper at the top of the file:
 function parsePaidBy(note: string | null): string | null {
   if (!note) return null;
   const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
@@ -62,17 +61,36 @@ function computeCurrentStockForItem(
 
 /**
  * GET /dashboard - Comprehensive 360° Business Dashboard
- * ✅ UPDATED: Works with new sales structure (no currentVersion)
+ * ✅ UPDATED: Includes JobPayments in sales analytics
  */
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { from, to } = req.query;
     const { start, end } = parseDateRange(from, to);
 
     // ============================================
-    // 1. SALES ANALYTICS
-    // ✅ FIXED: Sales still use currentVersion pattern
+    // 1. SALES ANALYTICS (Job Payments + Standalone Sales)
+    // ✅ FIXED: Now includes job payments
     // ============================================
+    
+    // Query job payments
+    const jobPayments = await prisma.jobPayment.findMany({
+      where: {
+        date: {
+          gte: start,
+          lte: end,
+        },
+      },
+      include: {
+        job: {
+          include: {
+            vehicle: true,
+          },
+        },
+      },
+    });
+
+    // Query standalone sales
     const sales = await prisma.sale.findMany({
       where: {
         currentVersion: {
@@ -93,6 +111,23 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
     const salesByReceiver = new Map<string, number>();
     const salesByCategory = new Map<string, number>();
 
+    // ✅ Process job payments first
+    for (const payment of jobPayments) {
+      totalSalesPaise += payment.amount;
+
+      const date = payment.date.toISOString().slice(0, 10);
+      salesByDate.set(date, (salesByDate.get(date) || 0) + payment.amount);
+
+      salesByMode.set(payment.paymentMode, (salesByMode.get(payment.paymentMode) || 0) + payment.amount);
+
+      const receiver = payment.receivedBy || "Untracked";
+      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + payment.amount);
+
+      const category = "Job Payment";
+      salesByCategory.set(category, (salesByCategory.get(category) || 0) + payment.amount);
+    }
+
+    // ✅ Process standalone sales
     for (const s of sales) {
       const v = s.currentVersion;
       if (!v) continue;
@@ -271,13 +306,12 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       totalVendorDue += vendor.totalDue;
 
       for (const payment of vendor.payments) {
-        totalVendorPayments += payment.amountPaid; // ✅ FIX: Use amountPaid, not amount
+        totalVendorPayments += payment.amountPaid;
         if (payment.status === "PENDING") vendorStats.pendingPayments++;
         else if (payment.status === "PARTIAL") vendorStats.partialPayments++;
         else if (payment.status === "PAID") vendorStats.paidPayments++;
       }
 
-      // ✅ FIX: Show vendors with payments in period OR outstanding dues
       if (vendor.payments.length > 0 || vendor.totalDue > 0) {
         topVendorsDue.push({
           id: vendor.id,
@@ -407,7 +441,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       },
     });
 
-    const recentActivity = auditLogs.map((log) => ({
+    const recentActivity = auditLogs.map((log: any) => ({
       action: log.action,
       summary: log.summary || `${log.action} on ${log.entityType}`,
       createdAt: log.timestamp,
@@ -455,8 +489,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       // Sales breakdown
       sales: {
         total: paiseToRupees(totalSalesPaise),
-        count: sales.length,
-        avgSale: sales.length > 0 ? paiseToRupees(totalSalesPaise) / sales.length : 0,
+        count: sales.length + jobPayments.length,
+        avgSale: (sales.length + jobPayments.length) > 0 ? paiseToRupees(totalSalesPaise) / (sales.length + jobPayments.length) : 0,
         byPaymentMode: Array.from(salesByMode.entries())
           .map(([mode, amount]) => ({
             mode,
