@@ -482,7 +482,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
         total: jobStats.total,
         byStatus: Object.entries(jobStats as any)
           .filter(([key]) => !["total", "open", "inProgress", "ready", "delivered", "cancelled", "totalRevenue", "totalAdvances", "totalPending"].includes(key))
-          .reduce((acc, [key, value]) => ({ ...acc, [key]: value }), {} as Record<string, number>),
+          .reduce((acc, [key, value]) => {acc[key] = value as number;return acc;}, {} as Record<string, number>),
         totalRevenue: paiseToRupees(jobStats.totalRevenue),
         totalPending: paiseToRupees(jobStats.totalPending),
         totalAdvances: paiseToRupees(jobStats.totalAdvances),

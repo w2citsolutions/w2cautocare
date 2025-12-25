@@ -30,7 +30,7 @@ function addPaidByToNote(paidBy: string | undefined, note: string | undefined): 
 function parsePaidBy(note: string | null): string | null {
   if (!note) return null;
   const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
-  return match ? match[1] : null;
+  return match ? (match[1] || null) : null;  // Ensure null, not undefined
 }
 
 function getCleanNote(note: string | null): string | null {

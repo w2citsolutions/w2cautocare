@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { logAudit } from "../utils/audit";
@@ -58,7 +58,7 @@ function parseLineType(input: string): LineType | null {
 /**
  * GET /job-card-templates - List all templates
  */
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { category, active } = req.query;
 
@@ -115,7 +115,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * POST /job-card-templates - Create new template
  */
-router.post("/", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { name, category, description, lineItems } = req.body as TemplateBody;
 
@@ -143,6 +143,10 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
     if (lineItems && lineItems.length > 0) {
       for (let i = 0; i < lineItems.length; i++) {
         const item = lineItems[i];
+        
+        // ✅ FIXED: Added null check for item
+        if (!item) continue;
+        
         const lineType = parseLineType(item.lineType);
 
         if (!lineType) {
@@ -188,13 +192,18 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
       summary: `Created job card template: ${template.name}`,
     });
 
+    // ✅ FIXED: Added null check for created
+    if (!created) {
+      return res.status(500).json({ message: "Failed to create template" });
+    }
+
     return res.status(201).json({
-      id: created!.id,
-      name: created!.name,
-      category: created!.category,
-      description: created!.description,
-      isActive: created!.isActive,
-      lineItems: created!.lineItems.map((item) => ({
+      id: created.id,
+      name: created.name,
+      category: created.category,
+      description: created.description,
+      isActive: created.isActive,
+      lineItems: created.lineItems.map((item) => ({
         id: item.id,
         lineType: item.lineType,
         description: item.description,
@@ -203,8 +212,8 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
         sortOrder: item.sortOrder,
         inventoryItem: item.inventoryItem,
       })),
-      createdAt: created!.createdAt,
-      updatedAt: created!.updatedAt,
+      createdAt: created.createdAt,
+      updatedAt: created.updatedAt,
     });
   } catch (err) {
     console.error("Create template error:", err);
@@ -215,7 +224,7 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * GET /job-card-templates/:id - Get template details
  */
-router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {
@@ -267,7 +276,7 @@ router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * PUT /job-card-templates/:id - Update template
  */
-router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {
@@ -351,7 +360,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
 /**
  * DELETE /job-card-templates/:id - Delete template
  */
-router.delete("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {
@@ -390,7 +399,7 @@ router.delete("/:id", authMiddleware, async (req: AuthRequest, res) => {
 router.post(
   "/:id/items",
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const templateId = Number(req.params.id);
       if (isNaN(templateId)) {
@@ -416,9 +425,10 @@ router.post(
         });
       }
 
+      // ✅ FIXED: Added proper typing for reduce function
       const maxSortOrder =
         template.lineItems.reduce(
-          (max, item) => Math.max(max, item.sortOrder),
+          (max: number, item: any) => Math.max(max, item.sortOrder),
           -1
         ) + 1;
 
@@ -461,7 +471,7 @@ router.post(
 router.put(
   "/:templateId/items/:itemId",
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const templateId = Number(req.params.templateId);
       const itemId = Number(req.params.itemId);
@@ -535,7 +545,7 @@ router.put(
 router.delete(
   "/:templateId/items/:itemId",
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const templateId = Number(req.params.templateId);
       const itemId = Number(req.params.itemId);

@@ -73,9 +73,9 @@ app.use("/jobcards", jobCardRoutes);
 app.use("/inspection-templates", inspectionTemplateRoutes);
 app.use("/", jobInspectionRoutes);
 
-// ✅ NEW ROUTES
+// ✅ NEW ROUTES - FIXED VARIABLE NAME
 app.use("/vendors", vendorRoutes);
-app.use("/job-card-templates", jobCardTemplateRoutes); // ✅ Fixed path
+app.use("/job-card-templates", jobCardTemplatesRouter); // ✅ Correct variable name
 //app.use("/dashboard-enhanced", dashboardEnhancedRoutes);
 
 

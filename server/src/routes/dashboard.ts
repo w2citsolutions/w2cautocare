@@ -42,10 +42,11 @@ function paiseToRupees(amount: number | null | undefined) {
   return Math.round(amount) / 100;
 }
 
-function parsePaidBy(note: string | null): string | null {
+// Add this helper at the top of the file:
+function safeParsePaidBy(note: string | null): string | null {
   if (!note) return null;
   const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
-  return match ? match[1] : null;
+  return match && match[1] ? match[1] : null;
 }
 
 function computeCurrentStockForItem(
