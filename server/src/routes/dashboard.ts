@@ -121,6 +121,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
 
     let totalExpensesPaise = 0;
     let totalEmployeeAdvancesPaise = 0;
+    let totalSalaryPaidPaise = 0;  // ✅ NEW: Track salary payments
     const expensesByDate = new Map<string, number>();
     const expensesByCategory = new Map<string, number>();
     const expensesByPaidBy = new Map<string, number>();
@@ -132,6 +133,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       if (!v) continue;
 
       const isEmployeeAdvance = v.category === "Employee Advance";
+      const isSalary = v.category === "Salary";  // ✅ NEW: Detect salary payments
 
       if (isEmployeeAdvance) {
         totalEmployeeAdvancesPaise += v.amount;
@@ -139,6 +141,11 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         employeeAdvances.set(employeeName, (employeeAdvances.get(employeeName) || 0) + v.amount);
       } else {
         totalExpensesPaise += v.amount;
+
+        // ✅ NEW: Track salary payments
+        if (isSalary) {
+          totalSalaryPaidPaise += v.amount;
+        }
 
         const date = v.date.toISOString().slice(0, 10);
         expensesByDate.set(date, (expensesByDate.get(date) || 0) + v.amount);
@@ -360,6 +367,9 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         else if (att.status === "UNPAID_LEAVE") attendanceStats.unpaidLeave++;
       }
     }
+
+    // ✅ NEW: Subtract already paid salaries from liability
+    totalSalaryLiability = Math.max(0, totalSalaryLiability - totalSalaryPaidPaise);
 
     advancesByEmployee.sort((a, b) => b.totalAdvances - a.totalAdvances);
 
