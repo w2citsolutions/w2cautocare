@@ -347,7 +347,6 @@ model StockTransaction {
 model Sale {
   id               Int          @id @default(autoincrement())
   currentVersionId Int?         @unique
-  jobCardId Int?     // ← Does this line exist?
 
   currentVersion   SaleVersion? @relation("SaleCurrent", fields: [currentVersionId], references: [id])
 
