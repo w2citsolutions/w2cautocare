@@ -18,7 +18,7 @@ import inspectionTemplateRoutes from "./routes/inspectionTemplates";
 import jobInspectionRoutes from "./routes/jobInspections";
 // ✅ NEW ROUTES
 import vendorRoutes from "./routes/vendors";
-import jobCardTemplateRoutes from "./routes/jobCardTemplates";
+import jobCardTemplatesRouter from './routes/Jobcardtemplates';
 //import dashboardEnhancedRoutes from "./routes/dashboard_enhanced";
 
 
