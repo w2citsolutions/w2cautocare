@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 
@@ -22,7 +22,7 @@ function mapVehicle(v: any) {
 }
 
 // POST /vehicles
-router.post("/", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const {
       regNumber,
@@ -85,7 +85,7 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // GET /vehicles?q=...
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const rawQ = req.query.q;
     const q = rawQ ? String(rawQ).trim() : "";
@@ -115,7 +115,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // GET /vehicles/:id
-router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: "Invalid vehicle id" });
@@ -136,7 +136,7 @@ router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // PUT /vehicles/:id
-router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ message: "Invalid vehicle id" });
@@ -190,7 +190,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
 router.get(
   "/by-reg/:regNumber",
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: AuthRequest, res: Response) => {
     try {
       const reg = String(req.params.regNumber).trim().toUpperCase();
 
@@ -201,7 +201,8 @@ router.get(
             include: {
               lineItems: true,
               payments: true,
-              sale: {
+              // ✅ FIXED: Changed 'sale' to 'sales' (correct property name)
+              sales: {
                 include: { currentVersion: true },
               },
             },
@@ -214,15 +215,17 @@ router.get(
         return res.status(404).json({ message: "Vehicle not found" });
       }
 
-      const jobs = vehicle.jobCards.map((j) => ({
+      // ✅ FIXED: Added type annotation and optional chaining
+      const jobs = vehicle.jobCards.map((j: any) => ({
         id: j.id,
         jobNumber: j.jobNumber,
         status: j.status,
         inDate: j.inDate,
         promisedDate: j.promisedDate,
         invoiceNumber: j.invoiceNumber,
-        saleAmount: j.sale?.currentVersion
-          ? j.sale.currentVersion.amount / 100
+        // ✅ FIXED: Changed 'sale' to 'sales' to match the include
+        saleAmount: j.sales?.currentVersion
+          ? j.sales.currentVersion.amount / 100
           : null,
       }));
 

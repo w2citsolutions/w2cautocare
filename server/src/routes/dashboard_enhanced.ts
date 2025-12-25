@@ -199,7 +199,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
       jobStats.totalPending += job.pendingAmount;
 
       // By template
-      const template = job.templateUsed || "GENERAL";
+      const template = "GENERAL"; // templateUsed property doesn't exist in schema
       jobsByTemplate.set(template, (jobsByTemplate.get(template) || 0) + 1);
     }
 
@@ -530,7 +530,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
 function parsePaidBy(note: string | null): string | null {
   if (!note) return null;
   const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
-  return match ? match[1] : null;
+  return match ? (match[1] || null) : null;  // ✅ FIXED
 }
 
 /**

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, Response } from "express";
 import prisma from "../config/prisma";
 import { authMiddleware, AuthRequest } from "../middleware/auth";
 import { logAudit } from "../utils/audit";
@@ -26,10 +26,11 @@ function addPaidByToNote(paidBy: string | undefined, note: string | undefined): 
   return note ? `${prefix} ${note}` : prefix;
 }
 
+// ✅ FIXED: Added || null to ensure return type is string | null, not string | undefined
 function parsePaidBy(note: string | null): string | null {
   if (!note) return null;
   const match = note.match(/^\[PAID_BY:([^\]]+)\]/);
-  return match ? match[1] : null;
+  return match ? (match[1] || null) : null;
 }
 
 function getCleanNote(note: string | null): string | null {
@@ -83,7 +84,7 @@ function mapExpense(e: any) {
 }
 
 // POST /expenses
-router.post("/", authMiddleware, async (req: AuthRequest, res) => {
+router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { date, amount, category, vendor, paymentMode, reference, note, paidBy } =
       req.body as ExpenseBody;
@@ -152,7 +153,7 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // GET /expenses
-router.get("/", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { category, vendor, from, to } = req.query;
 
@@ -196,7 +197,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // GET /expenses/:id
-router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.get("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {
@@ -243,7 +244,7 @@ router.get("/:id", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // PUT /expenses/:id
-router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.put("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {
@@ -281,6 +282,13 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
     );
     const newVersionNumber = maxVersion + 1;
 
+    // ✅ FIXED: Convert parsePaidBy result to string | undefined for addPaidByToNote
+    const existingPaidBy = parsePaidBy(expense.currentVersion.note);
+    const finalPaidBy = paidBy !== undefined ? paidBy : (existingPaidBy || undefined);
+    
+    const existingNote = getCleanNote(expense.currentVersion.note);
+    const finalNote = note !== undefined ? note : (existingNote || undefined);
+
     // Create new version
     const newVersion = await prisma.expenseVersion.create({
       data: {
@@ -298,10 +306,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
           : expense.currentVersion.paymentMode,
         reference:
           reference !== undefined ? reference : expense.currentVersion.reference,
-        note: addPaidByToNote(
-          paidBy !== undefined ? paidBy : parsePaidBy(expense.currentVersion.note),
-          note !== undefined ? note : getCleanNote(expense.currentVersion.note)
-        ), // ✅ Update paidBy
+        note: addPaidByToNote(finalPaidBy, finalNote), // ✅ FIXED: Type-safe parameters
         createdById: req.user?.id,
       },
     });
@@ -334,7 +339,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
 });
 
 // DELETE /expenses/:id
-router.delete("/:id", authMiddleware, async (req: AuthRequest, res) => {
+router.delete("/:id", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {

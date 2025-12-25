@@ -364,10 +364,10 @@ async function syncJobCardSale(jobId: number) {
       data: {
         saleId: sale.id,
         versionNumber: 1,
-        date: recentPayment.date,
+        date: recentPayment?.date || new Date(),
         amount: totalAmount,
         category: "Service",
-        paymentMode: recentPayment.paymentMode,
+        paymentMode: recentPayment?.paymentMode || "CASH",
         reference: job.jobNumber,
         receivedBy: receivedBy,
       },
