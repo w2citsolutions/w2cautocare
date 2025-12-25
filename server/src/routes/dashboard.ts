@@ -382,14 +382,16 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ✅ NEW: Subtract already paid salaries from liability
+    // ✅ NEW: Subtract already paid salaries AND advances from liability
     console.log('💰 Salary calculation:', {
       totalBaseSalary: paiseToRupees(totalSalaryLiability),
-      totalPaid: paiseToRupees(totalSalaryPaidPaise),
+      totalSalaryPaid: paiseToRupees(totalSalaryPaidPaise),
+      totalAdvances: paiseToRupees(totalEmployeeAdvancesPaise),
       activeEmployees: employeeStats.active,
     });
     
-    totalSalaryLiability = Math.max(0, totalSalaryLiability - totalSalaryPaidPaise);
+    // ✅ Subtract both salary payments AND employee advances
+    totalSalaryLiability = Math.max(0, totalSalaryLiability - totalSalaryPaidPaise - totalEmployeeAdvancesPaise);
     
     console.log('💰 Final salary due:', paiseToRupees(totalSalaryLiability));
 
