@@ -59,38 +59,16 @@ function computeCurrentStockForItem(
   return stock;
 }
 
-/**
- * GET /dashboard - Comprehensive 360° Business Dashboard
- * ✅ UPDATED: Includes JobPayments in sales analytics
- */
 router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { from, to } = req.query;
     const { start, end } = parseDateRange(from, to);
 
     // ============================================
-    // 1. SALES ANALYTICS (Job Payments + Standalone Sales)
-    // ✅ FIXED: Now includes job payments
+    // 1. SALES ANALYTICS
+    // ✅ FIXED: Only query Sales (job payments already create sales)
     // ============================================
     
-    // Query job payments
-    const jobPayments = await prisma.jobPayment.findMany({
-      where: {
-        date: {
-          gte: start,
-          lte: end,
-        },
-      },
-      include: {
-        job: {
-          include: {
-            vehicle: true,
-          },
-        },
-      },
-    });
-
-    // Query standalone sales
     const sales = await prisma.sale.findMany({
       where: {
         currentVersion: {
@@ -111,23 +89,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
     const salesByReceiver = new Map<string, number>();
     const salesByCategory = new Map<string, number>();
 
-    // ✅ Process job payments first
-    for (const payment of jobPayments) {
-      totalSalesPaise += payment.amount;
-
-      const date = payment.date.toISOString().slice(0, 10);
-      salesByDate.set(date, (salesByDate.get(date) || 0) + payment.amount);
-
-      salesByMode.set(payment.paymentMode, (salesByMode.get(payment.paymentMode) || 0) + payment.amount);
-
-      const receiver = payment.receivedBy || "Untracked";
-      salesByReceiver.set(receiver, (salesByReceiver.get(receiver) || 0) + payment.amount);
-
-      const category = "Job Payment";
-      salesByCategory.set(category, (salesByCategory.get(category) || 0) + payment.amount);
-    }
-
-    // ✅ Process standalone sales
     for (const s of sales) {
       const v = s.currentVersion;
       if (!v) continue;
@@ -173,12 +134,10 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       const isEmployeeAdvance = v.category === "Employee Advance";
 
       if (isEmployeeAdvance) {
-        // ✅ Track employee advances separately
         totalEmployeeAdvancesPaise += v.amount;
         const employeeName = v.vendor || "Unknown Employee";
         employeeAdvances.set(employeeName, (employeeAdvances.get(employeeName) || 0) + v.amount);
       } else {
-        // ✅ Track regular expenses only
         totalExpensesPaise += v.amount;
 
         const date = v.date.toISOString().slice(0, 10);
@@ -474,7 +433,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         to: end.toISOString(),
       },
 
-      // Core KPIs
       kpis: {
         totalSales: paiseToRupees(totalSalesPaise),
         totalExpenses: paiseToRupees(totalExpensesPaise),
@@ -486,11 +444,10 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         vendorDue: paiseToRupees(totalVendorDue),
       },
 
-      // Sales breakdown
       sales: {
         total: paiseToRupees(totalSalesPaise),
-        count: sales.length + jobPayments.length,
-        avgSale: (sales.length + jobPayments.length) > 0 ? paiseToRupees(totalSalesPaise) / (sales.length + jobPayments.length) : 0,
+        count: sales.length,
+        avgSale: sales.length > 0 ? paiseToRupees(totalSalesPaise) / sales.length : 0,
         byPaymentMode: Array.from(salesByMode.entries())
           .map(([mode, amount]) => ({
             mode,
@@ -514,7 +471,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           .sort((a, b) => b.amount - a.amount),
       },
 
-      // Expenses breakdown (excluding employee advances)
       expenses: {
         total: paiseToRupees(totalExpensesPaise),
         count: expenses.length - employeeAdvances.size,
@@ -545,7 +501,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           .slice(0, 10),
       },
 
-      // Employee advances (separate from expenses)
       employeeAdvances: {
         total: paiseToRupees(totalEmployeeAdvancesPaise),
         count: employeeAdvances.size,
@@ -560,10 +515,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           .sort((a, b) => b.amount - a.amount),
       },
 
-      // Cash flow by person
       cashFlow,
 
-      // Job cards
       jobCards: {
         total: jobStats.total,
         byStatus: {
@@ -601,7 +554,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           .slice(0, 10),
       },
 
-      // Vendors
       vendors: {
         stats: vendorStats,
         totalDue: paiseToRupees(totalVendorDue),
@@ -609,7 +561,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         topDue: topVendorsDue.slice(0, 10),
       },
 
-      // Employees
       employees: {
         stats: employeeStats,
         salaryLiability: paiseToRupees(totalSalaryLiability),
@@ -618,7 +569,6 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         attendance: attendanceStats,
       },
 
-      // Inventory
       inventory: {
         stats: inventoryStats,
         lowStockItems: lowStockItems.slice(0, 10),
@@ -628,12 +578,10 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         })),
       },
 
-      // Trends
       trends: {
         daily: dailyTrends,
       },
 
-      // Recent activity
       activity: recentActivity,
     });
   } catch (err) {
