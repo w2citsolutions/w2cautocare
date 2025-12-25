@@ -133,7 +133,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       if (!v) continue;
 
       const isEmployeeAdvance = v.category === "Employee Advance";
-      const isSalary = v.category === "Salary";  // ✅ NEW: Detect salary payments
+      // ✅ FIXED: Match any category containing 'salary' (case-insensitive)
+      const isSalary = v.category && v.category.toLowerCase().includes('salary');
 
       // ✅ DEBUG: Log salary detection
       if (v.category && v.category.toLowerCase().includes('salary')) {
