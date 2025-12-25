@@ -135,6 +135,16 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       const isEmployeeAdvance = v.category === "Employee Advance";
       const isSalary = v.category === "Salary";  // ✅ NEW: Detect salary payments
 
+      // ✅ DEBUG: Log salary detection
+      if (v.category && v.category.toLowerCase().includes('salary')) {
+        console.log('💰 Found salary expense:', {
+          category: v.category,
+          amount: paiseToRupees(v.amount),
+          vendor: v.vendor,
+          isSalary,
+        });
+      }
+
       if (isEmployeeAdvance) {
         totalEmployeeAdvancesPaise += v.amount;
         const employeeName = v.vendor || "Unknown Employee";
@@ -145,6 +155,7 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         // ✅ NEW: Track salary payments
         if (isSalary) {
           totalSalaryPaidPaise += v.amount;
+          console.log('✅ Added to salary paid:', paiseToRupees(v.amount), 'Total now:', paiseToRupees(totalSalaryPaidPaise));
         }
 
         const date = v.date.toISOString().slice(0, 10);
@@ -160,6 +171,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
         expensesByVendor.set(vendor, (expensesByVendor.get(vendor) || 0) + v.amount);
       }
     }
+
+    console.log('💰 Total salary paid this period:', paiseToRupees(totalSalaryPaidPaise));
 
     // ============================================
     // 3. CASH FLOW TRACKING
@@ -369,7 +382,15 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
     }
 
     // ✅ NEW: Subtract already paid salaries from liability
+    console.log('💰 Salary calculation:', {
+      totalBaseSalary: paiseToRupees(totalSalaryLiability),
+      totalPaid: paiseToRupees(totalSalaryPaidPaise),
+      activeEmployees: employeeStats.active,
+    });
+    
     totalSalaryLiability = Math.max(0, totalSalaryLiability - totalSalaryPaidPaise);
+    
+    console.log('💰 Final salary due:', paiseToRupees(totalSalaryLiability));
 
     advancesByEmployee.sort((a, b) => b.totalAdvances - a.totalAdvances);
 
