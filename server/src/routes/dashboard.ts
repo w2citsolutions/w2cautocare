@@ -259,6 +259,46 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
     jobStats.avgJobValue = jobStats.total > 0 ? jobStats.totalRevenue / jobStats.total : 0;
 
     // ============================================
+    // ✅ NEW: PENDING PAYMENT CUSTOMERS
+    // ============================================
+    const pendingPaymentCustomers = await prisma.jobCard.findMany({
+      where: {
+        inDate: { gte: start, lte: end },
+        pendingAmount: { gt: 0 }, // Has pending payment
+      },
+      select: {
+        jobNumber: true,
+        status: true,
+        customerName: true,
+        customerPhone: true,
+        pendingAmount: true,
+        vehicle: {
+          select: {
+            regNumber: true,
+            make: true,
+            model: true,
+          },
+        },
+      },
+      orderBy: {
+        pendingAmount: 'desc', // Highest pending first
+      },
+      take: 20, // Limit to top 20
+    });
+
+    // Format for frontend
+    const formattedPendingCustomers = pendingPaymentCustomers.map(job => ({
+      customerName: job.customerName || 'Unknown',
+      customerPhone: job.customerPhone || 'N/A',
+      vehicleNumber: job.vehicle?.regNumber || 'N/A',
+      vehicleMake: job.vehicle?.make || 'Unknown',
+      vehicleModel: job.vehicle?.model || '',
+      pendingAmount: paiseToRupees(job.pendingAmount),
+      jobNumber: job.jobNumber,
+      status: job.status,
+    }));
+
+    // ============================================
     // 5. VENDOR ANALYTICS
     // ============================================
     const vendors = await prisma.vendor.findMany({
@@ -593,6 +633,8 @@ router.get("/", authMiddleware, async (req: AuthRequest, res: Response) => {
           }))
           .sort((a, b) => b.totalRevenue - a.totalRevenue)
           .slice(0, 10),
+        // ✅ NEW: Add pending customers to response
+        pendingPaymentCustomers: formattedPendingCustomers,
       },
 
       vendors: {
